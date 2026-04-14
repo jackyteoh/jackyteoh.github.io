@@ -1,0 +1,127 @@
+/* ============================================================
+   Test suite — additional styles
+   ============================================================ */
+
+.progress-bar {
+  height: 4px;
+  background: var(--bg-secondary);
+  border-radius: 2px;
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--text-success);
+  border-radius: 2px;
+  transition: width 0.15s ease;
+}
+
+.log-area {
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  max-height: 140px;
+  overflow-y: auto;
+  margin-bottom: 1.25rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.idle-hint {
+  text-align: center;
+  padding: 2.5rem;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  border: 0.5px dashed var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+/* ---- Test groups ---- */
+.group {
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  margin-bottom: 10px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+.group-header {
+  background: var(--bg-secondary);
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  gap: 8px;
+}
+.group-header:hover { background: var(--bg-tertiary); }
+
+.group-chevron { font-size: 11px; color: var(--text-tertiary); transition: transform 0.15s; }
+.group-header.collapsed .group-chevron { transform: rotate(-90deg); }
+
+.group-badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-weight: 400;
+  flex-shrink: 0;
+}
+.badge-pass { background: var(--bg-success); color: var(--text-success); }
+.badge-fail { background: var(--bg-danger);  color: var(--text-danger); }
+.badge-pending {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 0.5px solid var(--border-subtle);
+}
+
+/* ---- Individual test rows ---- */
+.test-list { display: flex; flex-direction: column; }
+
+.test-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 14px;
+  border-top: 0.5px solid var(--border-subtle);
+  font-size: 13px;
+}
+.test-row.pass    { border-left: 3px solid var(--border-success); }
+.test-row.fail    { border-left: 3px solid var(--border-danger); }
+.test-row.pending { border-left: 3px solid var(--border-subtle); }
+
+.test-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; width: 16px; text-align: center; }
+.pass .test-icon    { color: var(--text-success); }
+.fail .test-icon    { color: var(--text-danger); }
+.pending .test-icon { color: var(--text-tertiary); }
+
+.test-name { flex: 1; line-height: 1.4; }
+
+.test-detail {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  font-family: var(--font-mono);
+}
+.test-err {
+  font-size: 11px;
+  color: var(--text-danger);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  background: var(--bg-danger);
+  padding: 3px 7px;
+  border-radius: 4px;
+  word-break: break-word;
+}
+.test-duration {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  white-space: nowrap;
+  align-self: center;
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TCG Tracker — Test Suite</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/tests.css">
+</head>
+<body>
+
+  <div class="app">
+
+    <div class="header">
+      <div>
+        <div class="title">TCG Tracker — Test Suite</div>
+        <div class="subtitle">Unit tests for core tracker logic &amp; CSV round-trip</div>
+      </div>
+      <div class="actions">
+        <a class="btn btn-sm" href="index.html">← Back to tracker</a>
+        <button class="btn btn-sm" id="test-toggle-log-btn">Toggle log</button>
+        <button class="btn btn-sm btn-primary" id="run-btn">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+            <polygon points="3,2 13,8 3,14"/>
+          </svg>
+          Run all tests
+        </button>
+      </div>
+    </div>
+
+    <div class="progress-bar"><div class="progress-fill" id="progress" style="width:0%"></div></div>
+    <pre class="log-area" id="log-area" style="display:none"></pre>
+
+    <div class="summary-bar">
+      <div class="metric"><div class="metric-label">Total</div><div class="metric-value" id="m-total">—</div></div>
+      <div class="metric"><div class="metric-label">Passed</div><div class="metric-value pass" id="m-pass">—</div></div>
+      <div class="metric"><div class="metric-label">Failed</div><div class="metric-value fail" id="m-fail">—</div></div>
+      <div class="metric"><div class="metric-label">Duration</div><div class="metric-value" id="m-dur">—</div></div>
+    </div>
+
+    <div id="results-area">
+      <div class="idle-hint">Click "Run all tests" to execute the test suite.</div>
+    </div>
+
+  </div>
+
+  <!-- Only tests.js needs to be listed — it imports core.js itself -->
+  <script type="module" src="js/tests.js"></script>
+</body>
+</html>
