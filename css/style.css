@@ -472,3 +472,11 @@ code {
   padding-left: 30px;
   width: 100%;
 }
+
+/* ── Add card via search button, locking it in place for better UX practices ──────────────────────────────────────────────── */
+#add-card-via-search-btn {
+  position: sticky; 
+  bottom: 0; 
+  z-index: 10;
+  background: var(--bg-secondary);
+}

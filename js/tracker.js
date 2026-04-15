@@ -443,16 +443,16 @@ function setStatus(html, type = '') {
    ============================================================ */
 
 function openSearchModal(editId) {
-  selectedResult = null;
-  document.getElementById('search-input').value            = '';
-  document.getElementById('url-input').value               = '';
-  document.getElementById('search-results-area').innerHTML = '';
-  document.getElementById('url-status').innerHTML          = '';
-  document.getElementById('add-selected-btn').disabled     = true;
-  document.getElementById('search-modal').dataset.editId   = editId ?? '';
-  document.getElementById('search-modal').style.display    = 'flex';
-  switchTab('name');
-  setTimeout(() => document.getElementById('search-input').focus(), 80);
+    selectedResult = null;
+    document.getElementById('search-input').value            = '';
+    document.getElementById('url-input').value               = '';
+    document.getElementById('search-results-area').innerHTML = '';
+    document.getElementById('url-status').innerHTML          = '';
+    document.getElementById('add-selected-btn').disabled     = true;
+    document.getElementById('search-modal').dataset.editId   = editId ?? '';
+    document.getElementById('search-modal').style.display    = 'flex';
+    switchTab('name');
+    setTimeout(() => document.getElementById('search-input').focus(), 80);
 }
 
 function closeSearchModal() {
@@ -620,6 +620,36 @@ async function doUrlLookup() {
   }
 }
 
+/* ── Reset search helper for Adding cards ────────────────────────────────────────────── */
+function resetSearchUI() {
+  selectedResult = null;
+
+  const input = document.getElementById('search-input');
+  input.value = '';
+  input.focus();
+
+  const resultsContainer = document.getElementById('search-results');
+  if (resultsContainer) resultsContainer.innerHTML = '';
+}
+
+/* ── Show add success helper for Adding cards ────────────────────────────────────────────── */
+function showAddSuccess(name, setName) {
+  const cardAdded = document.getElementById('card-added');
+  const btn = document.getElementById('add-selected-btn');
+
+  if (!cardAdded) return;
+
+  cardAdded.textContent = `${name} from ${setName} was added!`;
+  cardAdded.style.display = 'block';
+
+  btn.disabled = true;
+
+  // Disable add button for 1 second to prevent accidentally adding multiple
+  setTimeout(() => {
+    btn.disabled = false;
+  }, 1000);
+}
+
 /* ── Add selected card to list ────────────────────────────────────────────── */
 
 function addSelectedCard() {
@@ -651,8 +681,11 @@ function addSelectedCard() {
   }
 
   saveCardsToStorage();
-  closeSearchModal();
+  // closeSearchModal();
   renderTable();
+
+  showAddSuccess(cardData.name, entry.setName);
+  resetSearchUI();
 }
 
 /* ============================================================
