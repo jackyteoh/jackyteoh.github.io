@@ -535,6 +535,7 @@ function renderSearchResults(data) {
           ${pricePills || '<span style="font-size:11px;color:var(--text-tertiary)">No price data</span>'}
         </div>
         ${finishBtns ? `<div class="finish-picker">${finishBtns}</div>` : ''}
+        <button type="button" class="quick-add-btn" id="quick-add-btn">Quick Add</button>
       </div>`;
 
     div.dataset.cardJson = JSON.stringify({
@@ -548,8 +549,17 @@ function renderSearchResults(data) {
     // Delegate clicks within the result card
     div.addEventListener('click', e => {
       // Finish pill / button
-      const pill = e.target.closest('.price-pill, .finish-btn');
-      if (pill) { e.stopPropagation(); selectFinish(card.id, pill.dataset.finish, div); return; }
+      const pill = e.target.closest('.price-pill, .finish-btn, .quick-add-btn');
+      if (e.target.matches('.quick-add-btn')) { 
+        selectResultCard(card, div);
+        addSelectedCard();
+        return;
+      }
+      else {
+        e.stopPropagation(); 
+        selectFinish(card.id, pill.dataset.finish, div); 
+        return; 
+      }
       // Card selection
       selectResultCard(card, div);
     });
@@ -795,6 +805,7 @@ function initUI() {
   // ── Search modal footer ───────────────────────────────────────────────────
   document.getElementById('close-search-btn').addEventListener('click', closeSearchModal);
   document.getElementById('add-selected-btn').addEventListener('click', addSelectedCard);
+  // document.getElementById('quick-add-btn').addEventListener('click', addSelectedCard);
 
   // ── Hidden file input (CSV import fallback) ───────────────────────────────
   document.getElementById('file-input').addEventListener('change', handleFileImport);

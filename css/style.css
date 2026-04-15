@@ -414,6 +414,22 @@ code {
 .no-results    { color: var(--text-secondary); font-size: 13px; padding: 1.25rem 0; text-align: center; }
 .loading-state { color: var(--text-secondary); font-size: 13px; padding: 1.25rem 0; text-align: center; }
 
+.quick-add-btn {
+  float: right;
+  gap: 5px;
+  background: var(--text-primary);
+  border: 0.5px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 7px 13px;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--bg-primary);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.12s, opacity 0.12s;
+}
+
 /* ── Responsive ──────────────────────────────────────────── */
 @media (max-width: 640px) {
   .summary-bar { grid-template-columns: 1fr 1fr; }
