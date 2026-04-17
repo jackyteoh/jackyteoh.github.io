@@ -5,27 +5,29 @@ A browser-based Pokémon TCG card tracker with live prices from the
 
 ## What's new in this version
 
-- **ES module architecture** — `core.js` uses `export`, `tracker.js` and `tests.js`
-  use `import`. No more `window.TCG` bridge. The browser resolves the dependency
-  graph automatically.
-- **Event delegation** — table rows use a single delegated listener on `<tbody>`
-  instead of inline `onclick`/`oninput`/`onchange` on every cell.
-- **`initUI()` pattern** — all static button listeners are wired in one place at
-  the bottom of each file. No intermediate `const` variables — listeners are
-  attached inline with `getElementById(...).addEventListener(...)`.
-- **localStorage persistence** — the card list survives page refresh automatically.
-  Seed data only loads on the very first visit (when storage is empty).
-- **Price cache** — `fetchCardPrices()` checks `localStorage` before hitting the
-  network. Cache entries expire after 24 hours (configurable via `CACHE_TTL_MS`
-  in `core.js`). The Refresh button always bypasses the cache. A cache status
-  line and "Clear cache" button appear above the table.
-- **Filter bar** — search/filter the visible rows by card name or set without
-  leaving the page.
-- **Improved URL lookup** — two-strategy approach: numeric product ID first,
-  then slug-based name extraction as a fallback.
-- **`fmtAge()`** — human-readable cache age display ("1h 5m ago").
-- **13 new tests** covering `fmtAge`, price cache read/write/clear/TTL, and the
-  updated seed data shape. Total: ~90 tests across 12 groups.
+### Features added
+1. **Price delta (Δ Price column)** — shows ▲/▼ and dollar amount vs price before last refresh. Stored as `prevMarketNM`; persists through CSV.
+2. **Japanese card search** — "Japanese cards" toggle in the search modal. Uses `language:Japanese` API filter with wildcard name matching.
+3. **Larger search results (50)** — `pageSize` bumped from 12 to 50.
+4. **Set name filter** — second input in the search modal narrows results by set name.
+5. **Sold Price column** — user-entered actual sale price. Profit/Profit% switches to "Actual" (soldPrice − buyCost) when the card is sold and soldPrice is filled in.
+6. **Total Sold + Actual Profit in summary** — two new metric cards summing sold revenue and actual realised profit.
+7. **Undo (5 snapshots, Ctrl+Z)** — every mutation (field edit, delete, bulk action, import, refresh) pushes a snapshot. Undo button in the toolbar, also wired to Ctrl+Z / Cmd+Z.
+8. **Row checkboxes + bulk actions** — check-all in header, per-row checkboxes, bulk toolbar appears on selection with "Mark as sold" and "Delete selected" (with confirmation).
+9. **Duplicate button (⧉)** — per-row, inserts a copy directly below with a new id, cleared soldPrice, and fresh dates.
+10. **Search result cache (6 h TTL)** — search results are stored in `localStorage`. Subsequent searches with the same query+set+language return instantly from cache. Cleared by "Clear cache" button.
+
+### Architecture improvements
+- `calcActualProfit(card)` — new exported function for soldPrice-based profit
+- `calcPriceDelta(card)` — new exported function for Δ price
+- `snapshotCards(cards)` — deep-clone helper for undo
+- `searchCacheKey()`, `readSearchCache()`, `writeSearchCache()` — search cache helpers
+- `SEARCH_CACHE_TTL_MS` exported constant (6 h)
+- `UNDO_MAX_SNAPSHOTS` exported constant (5)
+- All new fields (`soldPrice`, `prevMarketNM`) in `CSV_HEADERS` and `makeCard` defaults
+
+### Test suite: 112 tests across 18 groups
+New groups: Actual profit, Price delta, Sparse CSV import, Undo snapshots, Search cache.
 
 ## Project structure
 
