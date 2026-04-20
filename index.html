@@ -25,10 +25,15 @@
           </svg>
           Refresh prices
         </button>
+        <label class="skip-sold-label" title="Exclude sold cards from price refresh">
+          <input type="checkbox" id="skip-sold-cb" checked>
+          Skip sold
+        </label>
         <button class="btn btn-sm" id="undo-btn" disabled title="Undo last action (Ctrl+Z)">↩ Undo</button>
         <button class="btn btn-sm" id="import-csv">Import CSV</button>
         <button class="btn btn-sm btn-primary" id="export-csv">Export CSV</button>
         <button class="btn btn-sm" id="col-toggle-btn" title="Show/hide columns">Columns ▾</button>
+        <button class="btn btn-sm" id="howto-btn" title="How to use this app">? How to use</button>
         <a class="btn btn-sm" href="tests.html">Run tests</a>
       </div>
     </div>
@@ -39,7 +44,18 @@
       <div class="cache-controls">
         <span id="cache-status" class="cache-status-text"></span>
         <button class="btn btn-sm" id="clear-cache-btn"
-                title="Force all cards to re-fetch prices on next refresh">Clear cache</button>
+                title="Clear price and search cache — next refresh fetches fresh data">Clear cache</button>
+      </div>
+    </div>
+
+    <!-- ── Refresh progress bar (hidden when idle) ───────────────────────── -->
+    <div id="refresh-progress-wrap" class="refresh-progress-wrap" style="display:none">
+      <div class="refresh-progress-header">
+        <span id="refresh-progress-label" class="refresh-progress-label">Fetching prices…</span>
+        <span id="refresh-progress-count" class="refresh-progress-count">0 / 0</span>
+      </div>
+      <div class="refresh-progress-track">
+        <div id="refresh-progress-bar" class="refresh-progress-bar" style="width:0%"></div>
       </div>
     </div>
 
@@ -48,7 +64,11 @@
       <div class="metric"><div class="metric-label">Total cards</div><div class="metric-value" id="sum-count">0</div></div>
       <div class="metric"><div class="metric-label">Total invested</div><div class="metric-value" id="sum-cost">$0.00</div></div>
       <div class="metric"><div class="metric-label">Market value</div><div class="metric-value" id="sum-market">$0.00</div></div>
-      <div class="metric"><div class="metric-label">Expected profit</div><div class="metric-value pos" id="sum-profit">$0.00</div></div>
+      <div class="metric">
+        <div class="metric-label">Expected profit</div>
+        <div class="metric-value pos" id="sum-profit">$0.00</div>
+        <div id="sum-profit-delta" class="metric-delta" style="display:none"></div>
+      </div>
       <div class="metric"><div class="metric-label">Total sold</div><div class="metric-value" id="sum-sold">$0.00</div></div>
       <div class="metric"><div class="metric-label">Actual profit</div><div class="metric-value pos" id="sum-actual-profit">$0.00</div></div>
     </div>
@@ -56,6 +76,10 @@
     <!-- ── Filter bar ───────────────────────────────────────────────────── -->
     <div class="filter-bar">
       <div class="filter-input-wrap">
+        <svg class="filter-icon" width="14" height="14" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6.5" cy="6.5" r="5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/>
+        </svg>
         <input type="text" id="filter-input" placeholder="Filter by name or set…">
       </div>
       <button class="btn btn-sm" id="filter-clear">Clear</button>
@@ -68,12 +92,11 @@
       <button class="btn btn-sm btn-danger" id="bulk-delete">Delete selected</button>
     </div>
 
-    <!-- ── Table area (col-panel is positioned relative to this) ────────── -->
+    <!-- ── Table area ────────────────────────────────────────────────────── -->
     <div class="table-area">
-
-      <!-- Column visibility panel (populated by JS) -->
       <div id="col-panel" class="col-panel" style="display:none"></div>
-
+      <div id="popover-backdrop" class="popover-backdrop" style="display:none"></div>
+      <div id="card-popover" class="card-popover" style="display:none"></div>
       <div class="table-wrap">
         <table id="card-table">
           <thead><tr></tr></thead>
@@ -81,12 +104,10 @@
         </table>
         <button class="add-row" id="add-card-via-search-btn">+ Add card via search</button>
       </div>
-
     </div>
 
   </div><!-- /.app -->
 
-  <!-- Hidden file input — fallback for browsers without showOpenFilePicker -->
   <input type="file" id="file-input" accept=".csv" style="display:none">
 
   <!-- ── Import modal ──────────────────────────────────────────────────── -->
@@ -102,33 +123,28 @@
     </div>
   </div>
 
-  <!-- ── Card search modal ─────────────────────────────────────────────── -->
+  <!-- ── Search modal ──────────────────────────────────────────────────── -->
   <div class="modal-backdrop" id="search-modal" style="display:none">
     <div class="modal modal-lg">
       <h3>Add card</h3>
-
       <div class="tab-bar">
         <button class="tab-btn tab-active" id="tabBtn-name">Search by name</button>
         <button class="tab-btn" id="tabBtn-url">Paste TCGPlayer URL</button>
       </div>
-
-      <!-- Tab: name search -->
       <div id="tab-name">
-        <p class="search-hint">Search by card name — results cached 6 h · prices live from pokemontcg.io</p>
+        <p class="search-hint">Exact match first, wildcard fallback · results cached 6 h · up to 100 results</p>
         <div id="card-added" class="card-added-feedback" style="display:none"></div>
         <div class="search-input-wrap">
-          <input type="text" id="search-input" placeholder="Card name, e.g. Charizard…">
-          <input type="text" id="set-filter-input" placeholder="Set name (optional)" style="max-width:160px">
+          <input type="text" id="search-input" placeholder="Card name, e.g. Charizard, Alakazam ex…">
+          <input type="text" id="set-filter-input" placeholder="Set name (optional)" style="max-width:155px">
           <button class="btn btn-primary" id="search-btn">Search</button>
         </div>
         <label class="jp-label">
           <input type="checkbox" id="jp-toggle">
-          Japanese cards
+          Japanese cards (wildcard name search)
         </label>
         <div id="search-results-area"></div>
       </div>
-
-      <!-- Tab: URL lookup -->
       <div id="tab-url" style="display:none">
         <p class="search-hint">
           Paste a TCGPlayer product URL — we'll look up the card automatically.<br>
@@ -139,14 +155,71 @@
           <button class="btn btn-primary" id="url-lookup-btn">Look up</button>
         </div>
         <div id="url-status" style="font-size:13px;margin-top:0.5rem;min-height:20px"></div>
-        <p class="search-hint" style="margin-top:0.5rem">
-          A successful lookup switches to the name tab for confirmation.
-        </p>
+        <p class="search-hint" style="margin-top:0.5rem">A successful lookup switches to the name tab for confirmation.</p>
       </div>
-
       <div class="modal-actions">
         <button class="btn" id="close-search-btn">Close</button>
         <button class="btn btn-primary" id="add-selected-btn" disabled>Add to list</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── How To modal ──────────────────────────────────────────────────── -->
+  <div class="modal-backdrop" id="howto-modal" style="display:none">
+    <div class="modal modal-howto">
+      <div class="howto-header">
+        <h3>How to use TCG Card Tracker</h3>
+        <button class="howto-close-x" id="howto-close-x" aria-label="Close">✕</button>
+      </div>
+      <div class="howto-body">
+
+        <div class="howto-section">
+          <div class="howto-section-title">Adding cards</div>
+          <p>Click <strong>+ Add card via search</strong> at the bottom of the table. Type a card name — the search tries an exact match first, then falls back to a wildcard if nothing is found. Optionally enter a set name to narrow results. Toggle <strong>Japanese cards</strong> to find Japanese-set printings. Click a result to select a finish, then press <strong>Add to list</strong> or <strong>Quick add</strong> — the modal stays open so you can keep adding. You can also paste a TCGPlayer product URL in the second tab.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Editing cards</div>
+          <p><strong>Click the card image</strong> to open the quick-edit popover — a compact panel where you can change condition, finish, buy cost, market price, and notes without scrolling the table. You can also edit <em>Buy cost</em> and <em>Sold price</em> inline; press <strong>Enter</strong> or click away to save. The <em>Duplicate</em> button (⧉) in the actions column inserts a copy below, useful for multiple copies of the same card in different conditions.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Tracking sales</div>
+          <p>Check the <strong>Sold</strong> checkbox on the right of a row — the row turns green. Enter the actual sale price in <strong>Sold price</strong> and the Profit column switches from <em>Expected</em> (market-based) to <em>Actual</em> (sold price − buy cost). <strong>Total sold</strong> and <strong>Actual profit</strong> in the summary bar update in real time.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Refreshing prices</div>
+          <p>Click <strong>Refresh prices</strong> to pull the latest market prices from pokemontcg.io. A progress bar shows the current card being fetched and how many remain. Cards with the same API ID share one fetch (deduplication). Check <strong>Skip sold</strong> to skip sold cards and save API calls. After refresh, the <em>Δ Price</em> column shows ▲/▼ per card, and the <strong>Expected profit</strong> summary shows the net portfolio delta since the last refresh. Prices are cached for 1 hour — click <strong>Clear cache</strong> to force a full re-fetch. New sets may show no price data for a few days until TCGPlayer's feed updates.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Bulk actions</div>
+          <p>Check one or more row checkboxes to reveal the bulk toolbar. <strong>Mark as sold</strong> marks all selected cards at once. <strong>Delete selected</strong> removes them after confirmation. The header checkbox selects all currently visible (filtered) rows. All bulk actions are undoable.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Filtering, sorting &amp; columns</div>
+          <p>Type in the <strong>filter bar</strong> to instantly search your list by card name or set name. Click any <strong>column header</strong> to sort — click again to reverse. Use <strong>Columns ▾</strong> to hide columns you don't need; preferences persist across sessions. The Image, Name, Sold, and action columns are always visible.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Import &amp; export</div>
+          <p><strong>Export CSV</strong> downloads your full list. <strong>Import CSV</strong> loads it back — choose to add to the existing list or replace it. Only a <em>name</em> column is required; everything else defaults gracefully, so a simple spreadsheet with name and buy cost is enough to get started.</p>
+        </div>
+
+        <div class="howto-section">
+          <div class="howto-section-title">Keyboard shortcuts</div>
+          <div class="howto-shortcuts">
+            <div class="howto-shortcut"><kbd>Ctrl+Z</kbd> <span>Undo last action (up to 5 steps)</span></div>
+            <div class="howto-shortcut"><kbd>Enter</kbd> <span>Save field edit · trigger search</span></div>
+            <div class="howto-shortcut"><kbd>Escape</kbd> <span>Close any open modal or panel</span></div>
+          </div>
+        </div>
+
+      </div><!-- /.howto-body -->
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="howto-close-footer">Got it</button>
       </div>
     </div>
   </div>

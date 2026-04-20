@@ -6,16 +6,18 @@ A browser-based Pokémon TCG card tracker with live prices from the
 ## What's new in this version
 
 ### Features added
-1. **Price delta (Δ Price column)** — shows ▲/▼ and dollar amount vs price before last refresh. Stored as `prevMarketNM`; persists through CSV.
-2. **Japanese card search** — "Japanese cards" toggle in the search modal. Uses `language:Japanese` API filter with wildcard name matching.
-3. **Larger search results (50)** — `pageSize` bumped from 12 to 50.
-4. **Set name filter** — second input in the search modal narrows results by set name.
-5. **Sold Price column** — user-entered actual sale price. Profit/Profit% switches to "Actual" (soldPrice − buyCost) when the card is sold and soldPrice is filled in.
-6. **Total Sold + Actual Profit in summary** — two new metric cards summing sold revenue and actual realised profit.
-7. **Undo (5 snapshots, Ctrl+Z)** — every mutation (field edit, delete, bulk action, import, refresh) pushes a snapshot. Undo button in the toolbar, also wired to Ctrl+Z / Cmd+Z.
-8. **Row checkboxes + bulk actions** — check-all in header, per-row checkboxes, bulk toolbar appears on selection with "Mark as sold" and "Delete selected" (with confirmation).
-9. **Duplicate button (⧉)** — per-row, inserts a copy directly below with a new id, cleared soldPrice, and fresh dates.
-10. **Search result cache (6 h TTL)** — search results are stored in `localStorage`. Subsequent searches with the same query+set+language return instantly from cache. Cleared by "Clear cache" button.
+1. **TCGPlayer link** — redirects user now to search landing page with card name + set name, extra click for user to double check but only viable solution atm
+2. **Japanese card search optimization** —  CURRENTLY NOT WORKING AS EXPECTED
+3. **Larger search results (100)** — `pageSize` bumped from 50 to 100.
+4. **Increased search optimization** — attempt to include more cards not shown by search, CURRENTLY NOT WORKING AS EXPECTED
+5. **Removed input lag** — was some delay after inputting buy cost field, transitioning to next field, this has been removed.
+6. **Notes section added** — added notes section to individual cards in case user wishes to add certain things, where obtained, etc, currently only editable via clicking card image, need to fix
+7. **Quick edit** — added quick edit modal popup when user clicks card image.
+8. **Progress loading bar during refresh** — added progress bar for the user to see where they are in the price refreshing process.
+9. **Duplicate card functionality fixing** — attempt to fix issues arising when duplicating cards, CURRENTLY NOT WORKING AS EXPECTED
+10. **Expected Profit Delta** — attempt to add expected profit delta in between refreshes, not showing up as expected in `Expected Profit Summary` window, CURRENTLY NOT WORKING AS EXPECTED
+11. **How to modal** — `How to` modal added for the user to explain how to use the application.
+12. **Better formatting for Summary windows** — added commas to summary windows to make it look better
 
 ### Architecture improvements
 - `calcActualProfit(card)` — new exported function for soldPrice-based profit

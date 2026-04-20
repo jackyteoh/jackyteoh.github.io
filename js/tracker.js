@@ -1,6 +1,5 @@
 /**
  * tracker.js — UI logic for index.html.
- * Imports everything from core.js via ES module syntax.
  */
 
 import {
@@ -11,6 +10,7 @@ import {
   searchCards, fetchCardPrices, fetchCardByUrl,
   readPriceCache, inspectPriceCache, clearPriceCache, CACHE_TTL_MS,
   snapshotCards, UNDO_MAX_SNAPSHOTS,
+  buildTCGSearchUrl,
   getSeedCards,
 } from './core.js';
 
@@ -18,8 +18,8 @@ import {
    State
    ============================================================ */
 
-const STORAGE_KEY      = 'tcg_tracker_cards';
-const COL_VIS_KEY      = 'tcg_tracker_col_visibility';
+const STORAGE_KEY = 'tcg_tracker_cards';
+const COL_VIS_KEY = 'tcg_tracker_col_visibility';
 
 let cards          = loadCardsFromStorage();
 let pendingCSVData = null;
@@ -30,43 +30,42 @@ let selectedIds    = new Set();
 let undoStack      = [];
 let colPanelOpen   = false;
 
-// Sorting
+// popover state
+let popoverCardId  = null;
+
+// Profit delta since last refresh (sum of adj-price deltas for unsold cards).
+// null = no prior refresh data to compare. Set after each successful refresh.
+let lastRefreshProfitDelta = null;
+
 let sortKey = 'dateAdded';
 let sortDir = 'desc';
-
-// Search modal state
 let searchJapanese = false;
 
 /* ============================================================
    Column definitions
-   All hideable columns are listed here. The frozen columns
-   (checkbox, image, name on left; sold, actions on right)
-   are always rendered and never appear in this list.
    ============================================================ */
 
 const COLUMNS = [
-  { key: 'condition',    label: 'Condition',      width: '84px',  defaultOn: true  },
-  { key: 'buyCost',      label: 'Buy cost',        width: '84px',  defaultOn: true  },
-  { key: 'soldPrice',    label: 'Sold price',      width: '88px',  defaultOn: true  },
-  { key: 'marketNM',     label: 'Market (NM)',     width: '106px', defaultOn: true  },
-  { key: 'priceDelta',   label: 'Δ Price',         width: '84px',  defaultOn: true  },
-  { key: 'priceLow',     label: 'Low',             width: '70px',  defaultOn: true  },
-  { key: 'priceMid',     label: 'Mid',             width: '70px',  defaultOn: true  },
-  { key: 'adjPrice',     label: 'Adj. price',      width: '88px',  defaultOn: true  },
-  { key: 'profit',       label: 'Profit / Actual', width: '106px', defaultOn: true  },
-  { key: 'pct',          label: 'Profit %',        width: '78px',  defaultOn: true  },
-  { key: 'link',         label: 'Link',            width: '80px',  defaultOn: true  },
-  { key: 'dateAdded',    label: 'Date added',      width: '110px', defaultOn: true  },
-  { key: 'lastUpdated',  label: 'Last updated',    width: '110px', defaultOn: false },
+  { key: 'condition',   label: 'Condition',      width: '84px',  defaultOn: true  },
+  { key: 'buyCost',     label: 'Buy cost',        width: '84px',  defaultOn: true  },
+  { key: 'soldPrice',   label: 'Sold price',      width: '88px',  defaultOn: true  },
+  { key: 'marketNM',    label: 'Market (NM)',     width: '106px', defaultOn: true  },
+  { key: 'priceDelta',  label: 'Δ Price',         width: '84px',  defaultOn: true  },
+  { key: 'priceLow',    label: 'Low',             width: '70px',  defaultOn: true  },
+  { key: 'priceMid',    label: 'Mid',             width: '70px',  defaultOn: true  },
+  { key: 'adjPrice',    label: 'Adj. price',      width: '88px',  defaultOn: true  },
+  { key: 'profit',      label: 'Profit / Actual', width: '106px', defaultOn: true  },
+  { key: 'pct',         label: 'Profit %',        width: '78px',  defaultOn: true  },
+  { key: 'link',        label: 'Link',            width: '80px',  defaultOn: true  },
+  { key: 'dateAdded',   label: 'Date added',      width: '110px', defaultOn: true  },
+  { key: 'lastUpdated', label: 'Last updated',    width: '110px', defaultOn: false },
 ];
 
-/** Load which columns are visible from localStorage (or use defaults). */
 function loadColVisibility() {
   try {
     const raw = localStorage.getItem(COL_VIS_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
-      // Merge saved state with any new columns added since last save
       return COLUMNS.reduce((acc, col) => {
         acc[col.key] = col.key in saved ? saved[col.key] : col.defaultOn;
         return acc;
@@ -81,11 +80,10 @@ function saveColVisibility() {
 }
 
 let colVisibility = loadColVisibility();
-
 function isColVisible(key) { return colVisibility[key] !== false; }
 
 /* ============================================================
-   localStorage persistence
+   localStorage
    ============================================================ */
 
 function saveCardsToStorage() {
@@ -97,14 +95,17 @@ function loadCardsFromStorage() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Ensure all ids are Numbers (fix for cards imported from old CSV/storage)
+        return parsed.map(c => ({ ...c, id: Number(c.id) }));
+      }
     }
   } catch { /* corrupt */ }
   return getSeedCards();
 }
 
 /* ============================================================
-   Undo stack
+   Undo
    ============================================================ */
 
 function pushUndo() {
@@ -116,6 +117,8 @@ function pushUndo() {
 function undo() {
   if (!undoStack.length) return;
   cards = undoStack.pop();
+  // Re-ensure numeric ids after restore
+  cards = cards.map(c => ({ ...c, id: Number(c.id) }));
   saveCardsToStorage();
   selectedIds.clear();
   renderTable();
@@ -151,15 +154,25 @@ function updateSummary() {
   const profitEl = document.getElementById('sum-profit');
   profitEl.textContent = fmt(expProfit);
   profitEl.className   = 'metric-value ' + (expProfit >= 0 ? 'pos' : 'neg');
+
+  // Profit delta badge — shown only after a refresh that has prior price data to compare
+  const deltaEl = document.getElementById('sum-profit-delta');
+  if (deltaEl) {
+    if (lastRefreshProfitDelta !== null && lastRefreshProfitDelta !== 0) {
+      const sign = lastRefreshProfitDelta >= 0 ? '▲' : '▼';
+      deltaEl.textContent = `${sign} ${fmt(Math.abs(lastRefreshProfitDelta))} since last refresh`;
+      deltaEl.className   = 'metric-delta ' + (lastRefreshProfitDelta >= 0 ? 'delta-up' : 'delta-down');
+      deltaEl.style.display = 'block';
+    } else {
+      deltaEl.style.display = 'none';
+    }
+  }
+
   const soldEl = document.getElementById('sum-sold');
   if (soldEl) soldEl.textContent = fmt(totalSold);
   const actEl = document.getElementById('sum-actual-profit');
   if (actEl) { actEl.textContent = fmt(actualProfit); actEl.className = 'metric-value ' + (actualProfit >= 0 ? 'pos' : 'neg'); }
 }
-
-/* ============================================================
-   Cache status bar
-   ============================================================ */
 
 function updateCacheStatus() {
   const el = document.getElementById('cache-status');
@@ -186,30 +199,26 @@ function sortArrow(key) {
   return `<span class="sort-arrow">${sortDir === 'asc' ? '↑' : '↓'}</span>`;
 }
 
-/* Build a sortable <th> with sticky support.
-   stickyLeft / stickyRight are pixel strings e.g. "0px" or null. */
+const STICKY_LEFT  = { checkbox: '0px', image: '36px', name: '90px' };
+const STICKY_RIGHT = { actions: '0px', sold: '68px' };
+
 function buildTh(label, key, width, stickyLeft = null, stickyRight = null) {
-  const sticky = stickyLeft  !== null ? `position:sticky;left:${stickyLeft};z-index:20;background:var(--bg-secondary);` :
-                 stickyRight !== null ? `position:sticky;right:${stickyRight};z-index:20;background:var(--bg-secondary);` : '';
-  return `<th data-sort-key="${key}" style="cursor:pointer;user-select:none;width:${width};${sticky}">` +
-         `${label} ${sortArrow(key)}</th>`;
+  const s = stickyLeft  != null ? `position:sticky;left:${stickyLeft};z-index:20;background:var(--bg-secondary);` :
+            stickyRight != null ? `position:sticky;right:${stickyRight};z-index:20;background:var(--bg-secondary);` : '';
+  return `<th data-sort-key="${key}" style="cursor:pointer;user-select:none;width:${width};${s}">${label} ${sortArrow(key)}</th>`;
 }
 
-/* Build a non-sortable <th>. */
 function buildFixedTh(label, width, stickyLeft = null, stickyRight = null, extra = '') {
-  const sticky = stickyLeft  !== null ? `position:sticky;left:${stickyLeft};z-index:20;background:var(--bg-secondary);` :
-                 stickyRight !== null ? `position:sticky;right:${stickyRight};z-index:20;background:var(--bg-secondary);` : '';
-  return `<th style="width:${width};${sticky}${extra}">${label}</th>`;
+  const s = stickyLeft  != null ? `position:sticky;left:${stickyLeft};z-index:20;background:var(--bg-secondary);` :
+            stickyRight != null ? `position:sticky;right:${stickyRight};z-index:20;background:var(--bg-secondary);` : '';
+  return `<th style="width:${width};${s}${extra}">${label}</th>`;
 }
 
 /* ============================================================
    Column visibility panel
    ============================================================ */
 
-function toggleColPanel() {
-  colPanelOpen = !colPanelOpen;
-  renderColPanel();
-}
+function toggleColPanel() { colPanelOpen = !colPanelOpen; renderColPanel(); }
 
 function closeColPanel() {
   colPanelOpen = false;
@@ -220,9 +229,7 @@ function closeColPanel() {
 function renderColPanel() {
   const panel = document.getElementById('col-panel');
   if (!panel) return;
-
   if (!colPanelOpen) { panel.style.display = 'none'; return; }
-
   panel.style.display = 'block';
   panel.innerHTML = `
     <div class="col-panel-header">
@@ -236,31 +243,24 @@ function renderColPanel() {
           ${col.label}
         </label>`).join('')}
     </div>`;
-
-  // Wire checkboxes
   panel.querySelectorAll('input[data-col-key]').forEach(cb => {
     cb.addEventListener('change', e => {
       colVisibility[e.target.dataset.colKey] = e.target.checked;
-      saveColVisibility();
-      renderTable();
+      saveColVisibility(); renderTable();
     });
   });
-
-  // Reset button
   document.getElementById('col-reset-btn').addEventListener('click', () => {
     COLUMNS.forEach(col => { colVisibility[col.key] = col.defaultOn; });
-    saveColVisibility();
-    renderColPanel(); // re-render panel checkboxes
-    renderTable();
+    saveColVisibility(); renderColPanel(); renderTable();
   });
 }
 
 /* ============================================================
-   Bulk-select helpers
+   Bulk-select
    ============================================================ */
 
 function updateBulkToolbar() {
-  const bar  = document.getElementById('bulk-toolbar');
+  const bar = document.getElementById('bulk-toolbar');
   const info = document.getElementById('bulk-count');
   if (!bar) return;
   const n = selectedIds.size;
@@ -269,23 +269,17 @@ function updateBulkToolbar() {
 }
 
 function toggleSelectAll(checked) {
-  const query    = filterQuery.toLowerCase();
-  const filtered = query ? cards.filter(c => c.name.toLowerCase().includes(query) || c.setName.toLowerCase().includes(query)) : cards;
-  if (checked) filtered.forEach(c => selectedIds.add(c.id));
-  else         selectedIds.clear();
+  const q = filterQuery.toLowerCase();
+  const f = q ? cards.filter(c => c.name.toLowerCase().includes(q) || c.setName.toLowerCase().includes(q)) : cards;
+  if (checked) f.forEach(c => selectedIds.add(c.id)); else selectedIds.clear();
   renderTable();
 }
 
 function bulkMarkSold() {
   if (!selectedIds.size) return;
   pushUndo();
-  for (const id of selectedIds) {
-    const card = cards.find(c => c.id === id);
-    if (card) { card.sold = true; touchUpdated(card); }
-  }
-  selectedIds.clear();
-  saveCardsToStorage();
-  renderTable();
+  for (const id of selectedIds) { const c = cards.find(x => x.id === id); if (c) { c.sold = true; touchUpdated(c); } }
+  selectedIds.clear(); saveCardsToStorage(); renderTable();
   setStatus('Selected cards marked as sold.', 'ok');
 }
 
@@ -295,74 +289,37 @@ function bulkDelete() {
   if (!confirm(`Delete ${n} selected card${n !== 1 ? 's' : ''}? This cannot be undone without Undo.`)) return;
   pushUndo();
   cards = cards.filter(c => !selectedIds.has(c.id));
-  selectedIds.clear();
-  saveCardsToStorage();
-  renderTable();
+  selectedIds.clear(); saveCardsToStorage(); renderTable();
   setStatus(`Deleted ${n} card${n !== 1 ? 's' : ''}.`, 'ok');
 }
 
 /* ============================================================
    Table rendering
-
-   Column layout:
-   LEFT FROZEN  │ SCROLLABLE MIDDLE        │ RIGHT FROZEN
-   ─────────────┼──────────────────────────┼──────────────────────
-   ☐  Img  Name │ Cond  Buy  Sold  Mkt … │ Sold☐  ⧉  🗑
    ============================================================ */
 
-// Cumulative left offsets for the three frozen-left columns
-const STICKY_LEFT = {
-  checkbox: '0px',
-  image:    '36px',
-  name:     '90px',   // 36 + 54
-};
-// Right offsets for frozen-right columns
-const STICKY_RIGHT = {
-  actions: '0px',
-  sold:    '68px',   // width of the actions cell
-};
-
 function renderTable(highlightIds = []) {
-  // ── Check-all state ─────────────────────────────────────────────────────────
-  const query    = filterQuery.toLowerCase();
-  const filtered = query ? cards.filter(c => c.name.toLowerCase().includes(query) || c.setName.toLowerCase().includes(query)) : cards;
+  const query      = filterQuery.toLowerCase();
+  const filtered   = query ? cards.filter(c => c.name.toLowerCase().includes(query) || c.setName.toLowerCase().includes(query)) : cards;
   const allVisible = filtered.length > 0 && filtered.every(c => selectedIds.has(c.id));
 
-  // ── Build header row ─────────────────────────────────────────────────────────
+  // Header
   const thead = document.querySelector('#card-table thead tr');
-
-  // Fixed left: checkbox + image + name (always visible)
-  let headerHtml =
-    buildFixedTh(`<input type="checkbox" id="check-all" ${allVisible && selectedIds.size > 0 ? 'checked' : ''}>`,
-                 '36px', STICKY_LEFT.checkbox, null, 'text-align:center;') +
+  let hh =
+    buildFixedTh(`<input type="checkbox" id="check-all" ${allVisible && selectedIds.size > 0 ? 'checked' : ''}>`, '36px', STICKY_LEFT.checkbox, null, 'text-align:center;') +
     buildFixedTh('Image', '54px', STICKY_LEFT.image) +
-    buildTh('Name', 'name', '180px', STICKY_LEFT.name);
-
-  // Hideable middle columns
+    buildTh('Name', 'name', '200px', STICKY_LEFT.name);
   for (const col of COLUMNS) {
     if (!isColVisible(col.key)) continue;
-    if (col.key === 'link' || col.key === 'dateAdded' || col.key === 'lastUpdated') {
-      headerHtml += buildFixedTh(col.label, col.width);
-    } else {
-      headerHtml += buildTh(col.label, col.key, col.width);
-    }
+    if (['link','dateAdded','lastUpdated'].includes(col.key)) hh += buildFixedTh(col.label, col.width);
+    else hh += buildTh(col.label, col.key, col.width);
   }
-
-  // Fixed right: sold checkbox + actions (always visible)
-  headerHtml +=
-    buildTh('Sold', 'sold', '52px', null, STICKY_RIGHT.sold) +
-    buildFixedTh('', '68px', null, STICKY_RIGHT.actions);
-
-  thead.innerHTML = headerHtml;
-
-  // Re-attach check-all listener (header is rebuilt every render)
+  hh += buildTh('Sold', 'sold', '52px', null, STICKY_RIGHT.sold) +
+        buildFixedTh('', '68px', null, STICKY_RIGHT.actions);
+  thead.innerHTML = hh;
   const checkAllEl = document.getElementById('check-all');
   if (checkAllEl) checkAllEl.addEventListener('change', e => toggleSelectAll(e.target.checked));
 
-  // ── Filter + sort ────────────────────────────────────────────────────────────
   const displayRows = sortCards(filtered, sortKey, sortDir);
-
-  // ── Rows ─────────────────────────────────────────────────────────────────────
   const tbody = document.getElementById('card-body');
   tbody.innerHTML = '';
 
@@ -372,16 +329,14 @@ function renderTable(highlightIds = []) {
     const highlighted = highlightIds.includes(card.id);
     const cached      = readPriceCache(card.tcgplayerId);
     const isSelected  = selectedIds.has(card.id);
-
-    const hasActual       = card.sold && parseFloat(card.soldPrice) > 0;
+    const hasActual   = card.sold && parseFloat(card.soldPrice) > 0;
     const { profit, pct } = hasActual ? calcActualProfit(card) : calcProfit(card);
-    const profitLabel     = hasActual ? 'Actual' : 'Expected';
+    const profitLabel = hasActual ? 'Actual' : 'Expected';
 
     let deltaBadge = '<span style="color:var(--text-tertiary)">—</span>';
     if (delta !== null) {
       const sign = delta >= 0 ? '▲' : '▼';
-      const cls  = delta >= 0 ? 'delta-up' : 'delta-down';
-      deltaBadge = `<span class="${cls}">${sign} ${fmt(Math.abs(delta))}</span>`;
+      deltaBadge = `<span class="${delta >= 0 ? 'delta-up' : 'delta-down'}">${sign} ${fmt(Math.abs(delta))}</span>`;
     }
 
     const tr = document.createElement('tr');
@@ -390,89 +345,51 @@ function renderTable(highlightIds = []) {
     if (isSelected)  tr.classList.add('row-selected');
     if (highlighted) tr.style.background = 'rgba(60,180,80,0.10)';
 
-    // Image cell content
     const imgContent = card.imageUrl
       ? `<img class="card-img" src="${escHtml(card.imageUrl)}" alt="${escHtml(card.name)}"
+              data-action="open-popover"
+              style="cursor:pointer"
               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
          <div class="card-img-placeholder" style="display:none">No image</div>`
       : `<div class="card-img-placeholder" data-action="open-search">Click to search</div>`;
 
-    // Finish label folded into Name cell as a subtitle line
     const finishLabel = FINISH_LABELS[card.finish] || card.finish || '';
     const subtitle    = [finishLabel, card.setName].filter(Boolean).join(' · ');
+    const cacheTitle  = cached ? `title="Cached ${fmtAge(Date.now() - cached.cachedAt)}"` : 'title="Not cached"';
+    const tcgUrl      = buildTCGSearchUrl(card.name, card.setName, card.link);
 
-    const cacheTitle = cached
-      ? `title="Cached ${fmtAge(Date.now() - cached.cachedAt)}"`
-      : 'title="Not cached — will fetch on next refresh"';
-
-    // Build direct TCGPlayer URL from productId, falling back to stored link
-    const tcgLink = card.tcgplayerId
-      ? `https://www.tcgplayer.com/product/${card.tcgplayerId.replace(/^[a-z]+-/i, '')}`.replace(
-          // tcgplayerId is like "sv3pt5-6" — but TCGPlayer product IDs are numeric.
-          // Use the stored link if we have it; otherwise skip.
-          /tcgplayer\.com\/product\/[^0-9].*/,
-          ''
-        )
-      : '';
-    // The stored card.link is the direct product URL we built at add-time.
-    // Use it as-is — it's already the clean direct URL.
-    const directLink = card.link || tcgLink || '';
-
-    // ── Frozen-left cells ──────────────────────────────────────────────────────
+    // Frozen-left
     let rowHtml = `
       <td class="frozen-left" style="left:${STICKY_LEFT.checkbox};text-align:center;width:36px">
         <input type="checkbox" data-action="select-row" ${isSelected ? 'checked' : ''}>
       </td>
       <td class="frozen-left" style="left:${STICKY_LEFT.image};width:54px">${imgContent}</td>
-      <td class="frozen-left" style="left:${STICKY_LEFT.name};width:180px;min-width:180px">
+      <td class="frozen-left name-cell" style="left:${STICKY_LEFT.name};width:200px;min-width:200px">
         <input type="text" value="${escHtml(card.name)}" placeholder="Card name" data-field="name">
         ${subtitle ? `<div class="name-subtitle">${escHtml(subtitle)}</div>` : ''}
+        ${card.notes ? `<div class="name-notes" title="${escHtml(card.notes)}">${escHtml(card.notes)}</div>` : ''}
         ${card.lastRefreshed ? `<div class="refresh-detail">Refreshed ${fmtTime(card.lastRefreshed)}</div>` : ''}
       </td>`;
 
-    // ── Hideable middle cells ──────────────────────────────────────────────────
-    const colCells = {
-      condition: `<td>
-        <select data-field="condition">
-          ${CONDITIONS.map(c => `<option value="${c}"${c === card.condition ? ' selected' : ''}>${c}</option>`).join('')}
-        </select></td>`,
-
-      buyCost: `<td><input type="number" value="${card.buyCost}" placeholder="0.00" step="0.01" min="0" data-field="buyCost"></td>`,
-
-      soldPrice: `<td><input type="number" value="${card.soldPrice}" placeholder="—" step="0.01" min="0" data-field="soldPrice"
-                        title="Actual sale price"></td>`,
-
-      marketNM: `<td style="font-size:12px${highlighted ? ';color:var(--text-success)' : ''}" ${cacheTitle}>
-        ${fmt(card.marketNM)}${cached ? ' <span class="cache-dot">●</span>' : ''}</td>`,
-
-      priceDelta: `<td>${deltaBadge}</td>`,
-
-      priceLow: `<td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceLow)}</td>`,
-
-      priceMid: `<td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceMid)}</td>`,
-
-      adjPrice: `<td style="font-weight:500">${adj > 0 ? fmt(adj) : '<span style="color:var(--text-tertiary)">—</span>'}</td>`,
-
-      profit: `<td class="${profit === null ? '' : profit >= 0 ? 'profit-pos' : 'profit-neg'}">
-        ${fmt(profit)}
-        <div style="font-size:9px;color:var(--text-tertiary);margin-top:1px">${profitLabel}</div>
-      </td>`,
-
-      pct: `<td class="${pct === null ? '' : pct >= 0 ? 'profit-pos' : 'profit-neg'}">${fmtPct(pct)}</td>`,
-
-      link: `<td>${directLink
-        ? `<a href="${escHtml(directLink)}" target="_blank" rel="noopener" class="link-open">TCGPlayer</a>`
-        : '<span style="font-size:11px;color:var(--text-tertiary)">—</span>'}</td>`,
-
-      dateAdded:   `<td class="date-cell">${escHtml(fmtDate(card.dateAdded))}</td>`,
-      lastUpdated: `<td class="date-cell">${escHtml(fmtDate(card.lastUpdated))}</td>`,
+    // Middle
+    const cells = {
+      condition: `<td><select data-field="condition">${CONDITIONS.map(c => `<option value="${c}"${c === card.condition ? ' selected' : ''}>${c}</option>`).join('')}</select></td>`,
+      buyCost:   `<td><input type="number" value="${card.buyCost}" placeholder="0.00" step="0.01" min="0" data-field="buyCost"></td>`,
+      soldPrice: `<td><input type="number" value="${card.soldPrice}" placeholder="—" step="0.01" min="0" data-field="soldPrice" title="Actual sale price"></td>`,
+      marketNM:  `<td style="font-size:12px${highlighted ? ';color:var(--text-success)' : ''}" ${cacheTitle}>${fmt(card.marketNM)}${cached ? ' <span class="cache-dot">●</span>' : ''}</td>`,
+      priceDelta:`<td>${deltaBadge}</td>`,
+      priceLow:  `<td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceLow)}</td>`,
+      priceMid:  `<td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceMid)}</td>`,
+      adjPrice:  `<td style="font-weight:500">${adj > 0 ? fmt(adj) : '<span style="color:var(--text-tertiary)">—</span>'}</td>`,
+      profit:    `<td class="${profit === null ? '' : profit >= 0 ? 'profit-pos' : 'profit-neg'}">${fmt(profit)}<div style="font-size:9px;color:var(--text-tertiary);margin-top:1px">${profitLabel}</div></td>`,
+      pct:       `<td class="${pct === null ? '' : pct >= 0 ? 'profit-pos' : 'profit-neg'}">${fmtPct(pct)}</td>`,
+      link:      `<td>${tcgUrl ? `<a href="${escHtml(tcgUrl)}" target="_blank" rel="noopener" class="link-open">TCGPlayer ↗</a>` : '<span style="font-size:11px;color:var(--text-tertiary)">—</span>'}</td>`,
+      dateAdded:  `<td class="date-cell">${escHtml(fmtDate(card.dateAdded))}</td>`,
+      lastUpdated:`<td class="date-cell">${escHtml(fmtDate(card.lastUpdated))}</td>`,
     };
+    for (const col of COLUMNS) { if (isColVisible(col.key)) rowHtml += cells[col.key]; }
 
-    for (const col of COLUMNS) {
-      if (isColVisible(col.key)) rowHtml += colCells[col.key];
-    }
-
-    // ── Frozen-right cells ─────────────────────────────────────────────────────
+    // Frozen-right
     rowHtml += `
       <td class="frozen-right" style="right:${STICKY_RIGHT.sold};width:52px;text-align:center">
         <input type="checkbox" data-field="sold" ${card.sold ? 'checked' : ''}>
@@ -489,16 +406,14 @@ function renderTable(highlightIds = []) {
   if (displayRows.length === 0) {
     const emptyTr = document.createElement('tr');
     const span = 3 + COLUMNS.filter(c => isColVisible(c.key)).length + 2;
-    emptyTr.innerHTML = `<td colspan="${span}" style="text-align:center;padding:2rem;color:var(--text-tertiary)">
-      ${query ? `No cards match "${escHtml(filterQuery)}"` : 'No cards yet — add one below.'}
-    </td>`;
+    emptyTr.innerHTML = `<td colspan="${span}" style="text-align:center;padding:2rem;color:var(--text-tertiary)">${query ? `No cards match "${escHtml(filterQuery)}"` : 'No cards yet — add one below.'}</td>`;
     tbody.appendChild(emptyTr);
   }
 
   updateSummary();
   updateCacheStatus();
   updateBulkToolbar();
-  renderColPanel(); // keep panel in sync if open
+  renderColPanel();
 }
 
 /* ============================================================
@@ -513,19 +428,34 @@ function bindTableDelegation() {
 
   const tbody = document.getElementById('card-body');
 
+  // #7 Fix: no full re-render on blur for text/number inputs.
+  // We update the card data and save, then only re-render the summary.
+  // Full renderTable() only fires for fields that affect visible computed cells.
+  const FULL_RERENDER_FIELDS = new Set(['condition', 'sold', 'buyCost', 'soldPrice', 'marketNM']);
+
   tbody.addEventListener('blur', e => {
     const input = e.target.closest('input[data-field]');
     if (!input || input.type === 'checkbox') return;
     const cardId = getRowCardId(input);
-    if (cardId !== null) setField(cardId, input.dataset.field, input.value);
+    if (cardId === null) return;
+    const field = input.dataset.field;
+    const value = input.value;
+    const card = cards.find(c => c.id === cardId);
+    if (!card || card[field] === value) return; // no change
+    pushUndo();
+    card[field] = value;
+    touchUpdated(card);
+    saveCardsToStorage();
+    // Only full re-render when other cells are affected by this field change
+    if (FULL_RERENDER_FIELDS.has(field)) renderTable();
+    else updateSummary(); // just refresh totals
   }, true);
 
   tbody.addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
     const input = e.target.closest('input[data-field]');
     if (!input || input.type === 'checkbox') return;
-    const cardId = getRowCardId(input);
-    if (cardId !== null) setField(cardId, input.dataset.field, input.value);
+    input.blur(); // trigger blur handler above
   });
 
   tbody.addEventListener('change', e => {
@@ -555,19 +485,22 @@ function bindTableDelegation() {
       return;
     }
     if (btn.dataset.action === 'duplicate') { const id = getRowCardId(btn); if (id !== null) duplicateCard(id); return; }
-    if (btn.dataset.action === 'open-search') { const id = getRowCardId(btn); openSearchModal(id ?? undefined); }
+    if (btn.dataset.action === 'open-search') { const id = getRowCardId(btn); openSearchModal(id ?? undefined); return; }
+    if (btn.dataset.action === 'open-popover') { const id = getRowCardId(btn); if (id !== null) openPopover(id, btn); return; }
   });
 }
 
+// #2 Fix: always coerce to Number so === works even after JSON round-trips
 function getRowCardId(el) {
   const tr = el.closest('tr[data-card-id]');
-  return tr ? parseInt(tr.dataset.cardId, 10) : null;
+  return tr ? Number(tr.dataset.cardId) : null;
 }
 
 /* ============================================================
    Field mutation helpers
    ============================================================ */
 
+// Used for select/checkbox changes that always need a full re-render
 function setField(id, field, value) {
   const card = cards.find(c => c.id === id);
   if (!card) return;
@@ -590,13 +523,147 @@ function duplicateCard(id) {
   if (!original) return;
   pushUndo();
   const dupe = makeCard({
-    ...original, id: undefined, sold: false, soldPrice: '',
-    dateAdded: new Date().toISOString(), lastUpdated: new Date().toISOString(),
+    ...original,
+    id:          undefined,   // makeCard assigns a fresh numeric id
+    sold:        false,
+    soldPrice:   '',
+    dateAdded:   new Date().toISOString(),
+    lastUpdated: new Date().toISOString(),
   });
   const idx = cards.findIndex(c => c.id === id);
   cards.splice(idx + 1, 0, dupe);
   saveCardsToStorage();
   renderTable([dupe.id]);
+}
+
+/* ============================================================
+   Quick-edit popover (#8 / #9)
+   ============================================================ */
+
+function openPopover(cardId, triggerEl) {
+  const card = cards.find(c => c.id === cardId);
+  if (!card) return;
+  popoverCardId = cardId;
+
+  const popEl = document.getElementById('card-popover');
+  if (!popEl) return;
+
+  const finishLabel = FINISH_LABELS[card.finish] || card.finish || '';
+  const subtitle    = [finishLabel, card.setName].filter(Boolean).join(' · ');
+  const adj         = adjPrice(card);
+  const { profit }  = calcProfit(card);
+
+  popEl.innerHTML = `
+    <div class="popover-header">
+      ${card.imageUrl ? `<img class="popover-img" src="${escHtml(card.imageUrl)}" alt="${escHtml(card.name)}">` : ''}
+      <div class="popover-title-block">
+        <div class="popover-card-name">${escHtml(card.name)}</div>
+        <div class="popover-card-sub">${escHtml(subtitle)}</div>
+        ${card.sold ? '<span class="popover-sold-badge">Sold</span>' : ''}
+      </div>
+      <button class="popover-close" id="popover-close-btn" aria-label="Close">✕</button>
+    </div>
+
+    <div class="popover-grid">
+      <div class="popover-field">
+        <label class="popover-label">Condition</label>
+        <select id="pop-condition">
+          ${CONDITIONS.map(c => `<option value="${c}"${c === card.condition ? ' selected' : ''}>${c}</option>`).join('')}
+        </select>
+      </div>
+      <div class="popover-field">
+        <label class="popover-label">Finish</label>
+        <select id="pop-finish">
+          ${Object.entries(FINISH_LABELS).map(([k,v]) => `<option value="${k}"${k === card.finish ? ' selected' : ''}>${v}</option>`).join('')}
+        </select>
+      </div>
+      <div class="popover-field">
+        <label class="popover-label">Buy cost</label>
+        <input type="number" id="pop-buyCost" value="${card.buyCost}" step="0.01" min="0" placeholder="0.00">
+      </div>
+      <div class="popover-field">
+        <label class="popover-label">Market (NM)</label>
+        <input type="number" id="pop-marketNM" value="${card.marketNM ?? ''}" step="0.01" min="0" placeholder="—">
+      </div>
+    </div>
+
+    <div class="popover-field" style="margin-bottom:0.65rem">
+      <label class="popover-label">Notes / memo</label>
+      <textarea id="pop-notes" rows="2" placeholder="e.g. Bought at locals, PSA pending, trade target…">${escHtml(card.notes || '')}</textarea>
+    </div>
+
+    <div class="popover-stats">
+      <div class="popover-stat">
+        <div class="popover-stat-label">Adj. price</div>
+        <div class="popover-stat-val" id="pop-adj">${fmt(adj)}</div>
+      </div>
+      <div class="popover-stat">
+        <div class="popover-stat-label">Expected profit</div>
+        <div class="popover-stat-val ${profit === null ? '' : profit >= 0 ? 'pos' : 'neg'}" id="pop-profit">${fmt(profit)}</div>
+      </div>
+    </div>
+
+    <div class="popover-actions">
+      <button class="btn btn-sm" id="pop-cancel-btn">Cancel</button>
+      <button class="btn btn-sm btn-primary" id="pop-save-btn">Save changes</button>
+    </div>`;
+
+  // Position: below the trigger row
+  const tableWrap = document.querySelector('.table-wrap');
+  const triggerRect = triggerEl.getBoundingClientRect();
+  const wrapRect    = tableWrap.getBoundingClientRect();
+  const relTop  = triggerRect.bottom - wrapRect.top + tableWrap.scrollTop + 4;
+  const relLeft = Math.max(4, Math.min(triggerRect.left - wrapRect.left - 4, wrapRect.width - 360));
+  popEl.style.top     = relTop + 'px';
+  popEl.style.left    = relLeft + 'px';
+  popEl.style.display = 'block';
+  document.getElementById('popover-backdrop').style.display = 'block';
+
+  // Live computed stats
+  function refreshStats() {
+    const mkt  = parseFloat(document.getElementById('pop-marketNM').value) || 0;
+    const buy  = parseFloat(document.getElementById('pop-buyCost').value)  || 0;
+    const cond = document.getElementById('pop-condition').value;
+    const MULT = { NM:1, LP:.85, MP:.7, HP:.5, DMG:.3 };
+    const adjV = mkt * (MULT[cond] || 1);
+    const profV = (adjV && buy) ? adjV - buy : null;
+    document.getElementById('pop-adj').textContent = fmt(adjV);
+    const profEl = document.getElementById('pop-profit');
+    profEl.textContent = fmt(profV);
+    profEl.className   = 'popover-stat-val ' + (profV === null ? '' : profV >= 0 ? 'pos' : 'neg');
+  }
+
+  ['pop-condition','pop-buyCost','pop-marketNM'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', refreshStats);
+  });
+
+  document.getElementById('popover-close-btn').addEventListener('click', closePopover);
+  document.getElementById('pop-cancel-btn').addEventListener('click', closePopover);
+  document.getElementById('pop-save-btn').addEventListener('click', savePopover);
+}
+
+function closePopover() {
+  document.getElementById('card-popover').style.display       = 'none';
+  document.getElementById('popover-backdrop').style.display   = 'none';
+  popoverCardId = null;
+}
+
+function savePopover() {
+  if (popoverCardId === null) return;
+  const card = cards.find(c => c.id === popoverCardId);
+  if (!card) { closePopover(); return; }
+
+  pushUndo();
+  card.condition = document.getElementById('pop-condition').value;
+  card.finish    = document.getElementById('pop-finish').value;
+  card.buyCost   = document.getElementById('pop-buyCost').value;
+  const mktVal   = document.getElementById('pop-marketNM').value;
+  card.marketNM  = mktVal !== '' ? parseFloat(mktVal) : null;
+  card.notes     = document.getElementById('pop-notes').value;
+  touchUpdated(card);
+  saveCardsToStorage();
+  closePopover();
+  renderTable();
 }
 
 /* ============================================================
@@ -607,46 +674,115 @@ function onFilterInput(e) { filterQuery = e.target.value; renderTable(); }
 function clearFilter()     { filterQuery = ''; document.getElementById('filter-input').value = ''; renderTable(); }
 
 /* ============================================================
-   Refresh prices
+   Refresh prices (#4 — skip sold + dedup by tcgplayerId)
    ============================================================ */
 
 async function refreshAllPrices() {
   if (refreshing) return;
-  const refreshable = cards.filter(c => c.tcgplayerId);
-  if (!refreshable.length) { setStatus('No cards with API data to refresh.', 'err'); return; }
+
+  const skipSold = document.getElementById('skip-sold-cb')?.checked ?? true;
+  const eligible = cards.filter(c => c.tcgplayerId && !(skipSold && c.sold));
+  if (!eligible.length) {
+    setStatus(skipSold ? 'No unsold cards with price data to refresh.' : 'No cards with price data to refresh.', 'err');
+    return;
+  }
+
+  // Deduplicate: only fetch each unique tcgplayerId once
+  const uniqueIds = [...new Set(eligible.map(c => c.tcgplayerId))];
+  const total = uniqueIds.length;
 
   refreshing = true;
   const refreshBtn = document.getElementById('refresh-btn');
   refreshBtn.disabled  = true;
   refreshBtn.innerHTML = '<span class="spin">&#8635;</span> Refreshing…';
-  setStatus(`<span class="spin" style="display:inline-block;animation:spin 0.85s linear infinite">&#8635;</span> Fetching prices for ${refreshable.length} card${refreshable.length > 1 ? 's' : ''}…`, '');
+
+  // Show and reset progress bar
+  const progressWrap  = document.getElementById('refresh-progress-wrap');
+  const progressBar   = document.getElementById('refresh-progress-bar');
+  const progressLabel = document.getElementById('refresh-progress-label');
+  const progressCount = document.getElementById('refresh-progress-count');
+  if (progressWrap)  progressWrap.style.display = 'block';
+  if (progressBar)   progressBar.style.width    = '0%';
+  if (progressCount) progressCount.textContent  = `0 / ${total}`;
+  if (progressLabel) progressLabel.textContent  = 'Fetching prices…';
+
+  setStatus('', '');
 
   pushUndo();
   let ok = 0, fail = 0;
+  const priceMap   = {}; // tcgplayerId → prices object
   const updatedIds = [];
 
-  for (const card of refreshable) {
+  for (let i = 0; i < uniqueIds.length; i++) {
+    const tcgId = uniqueIds[i];
+
+    // Update progress before the fetch so the user sees movement immediately
+    const pct = Math.round(((i) / total) * 100);
+    if (progressBar)   progressBar.style.width   = pct + '%';
+    if (progressCount) progressCount.textContent = `${i + 1} / ${total}`;
+    // if (progressLabel && i < uniqueIds.length - 1) progressLabel.textContent = `Fetching: ${cardName}`;
+
     try {
-      const prices = await fetchCardPrices(card.tcgplayerId, true);
-      if (prices) {
-        const p = prices[card.finish] || prices[Object.keys(prices)[0]] || {};
-        if (p.market !== undefined && p.market !== card.marketNM) card.prevMarketNM = card.marketNM;
-        if (p.market !== undefined) card.marketNM = p.market;
-        if (p.low    !== undefined) card.priceLow = p.low;
-        if (p.mid    !== undefined) card.priceMid = p.mid;
-        card.lastRefreshed = Date.now();
-        touchUpdated(card);
-        updatedIds.push(card.id);
-        ok++;
-      } else { fail++; }
+      const prices = await fetchCardPrices(tcgId, true);
+      if (prices) { priceMap[tcgId] = prices; ok++; }
+      else          fail++;
     } catch { fail++; }
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 120));
   }
+
+  // Fill bar to 100%
+  if (progressBar)   progressBar.style.width   = '100%';
+  if (progressCount) progressCount.textContent = `${total} / ${total}`;
+  if (progressLabel) progressLabel.textContent = 'Done!';
+
+  // Apply fetched prices to all matching cards, accumulating profit delta
+  let profitDeltaSum = 0;
+  let hasDeltaData   = false;
+
+  for (const card of eligible) {
+    const prices = priceMap[card.tcgplayerId];
+    if (!prices) continue;
+    const p = prices[card.finish] || prices[Object.keys(prices)[0]] || {};
+
+    // Capture old marketNM for delta before overwriting
+    const oldMarket = card.marketNM;
+
+    if (p.market !== undefined && p.market !== card.marketNM) card.prevMarketNM = card.marketNM;
+    if (p.market !== undefined) card.marketNM = p.market;
+    if (p.low    !== undefined) card.priceLow = p.low;
+    if (p.mid    !== undefined) card.priceMid = p.mid;
+    card.lastRefreshed = Date.now();
+    touchUpdated(card);
+    updatedIds.push(card.id);
+
+    // Accumulate profit delta for unsold cards with both old and new prices
+    if (!card.sold && oldMarket !== null && card.marketNM !== null) {
+      const mult = { NM:1, LP:.85, MP:.7, HP:.5, DMG:.3 }[card.condition] ?? 1;
+      profitDeltaSum += (card.marketNM - oldMarket) * mult;
+      hasDeltaData = true;
+    }
+  }
+
+  // Store profit delta for display in summary (null = no data)
+  lastRefreshProfitDelta = hasDeltaData ? profitDeltaSum : null;
 
   saveCardsToStorage();
   renderTable(updatedIds);
+
+  // Hide progress bar after a short delay so the user can see it hit 100%
+  setTimeout(() => {
+    if (progressWrap)  progressWrap.style.display = 'none';
+    if (progressBar)   progressBar.style.width    = '0%';
+    if (progressLabel) progressLabel.textContent  = 'Fetching prices…';
+    if (progressCount) progressCount.textContent  = '0 / 0';
+  }, 800);
+
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  setStatus(`Refreshed ${ok} card${ok !== 1 ? 's' : ''}` + (fail ? ` · ${fail} failed` : '') + `  ·  ${time}`, fail && !ok ? 'err' : 'ok');
+  setStatus(
+    `Refreshed ${ok} unique price${ok !== 1 ? 's' : ''} \u2192 applied to ${updatedIds.length} card${updatedIds.length !== 1 ? 's' : ''}` +
+    (fail ? ` · ${fail} failed` : '') + `  ·  ${time}`,
+    fail && !ok ? 'err' : 'ok'
+  );
   refreshBtn.disabled  = false;
   refreshBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8a7 7 0 1 0 1.4-4.2"/><polyline points="1,2 1,6 5,6"/></svg> Refresh prices`;
   refreshing = false;
@@ -705,7 +841,10 @@ async function doSearch() {
   document.getElementById('add-selected-btn').disabled = true;
   try {
     const data = await searchCards(q, setQ, searchJapanese);
-    if (!data.length) { area.innerHTML = `<div class="no-results">No cards found. Try a different name${setQ ? ' or set' : ''}.</div>`; return; }
+    if (!data.length) {
+      area.innerHTML = `<div class="no-results">No cards found${searchJapanese ? ' (Japanese mode \u2014 try the English name)' : ''}. Try a different name${setQ ? ' or set' : ''}.</div>`;
+      return;
+    }
     renderSearchResults(data);
   } catch (err) {
     area.innerHTML = `<div class="no-results">Search failed: ${escHtml(err.message)}<br>Make sure you are serving via HTTP (not file://).</div>`;
@@ -722,7 +861,7 @@ function renderSearchResults(data) {
     const defaultFin = finishKeys[0] || null;
     const div = document.createElement('div');
     div.className = 'result-card';
-    div.dataset.cardId         = card.id;
+    div.dataset.cardId = card.id;
     div.dataset.selectedFinish = defaultFin || '';
 
     const pricePills = finishKeys.map(fk => {
@@ -736,28 +875,27 @@ function renderSearchResults(data) {
       ? finishKeys.map(fk => `<button class="finish-btn${fk === defaultFin ? ' active' : ''}" data-finish="${fk}">${FINISH_LABELS[fk] || fk}</button>`).join('')
       : '';
 
+    // No price data note for new sets
+    const noPriceNote = finishKeys.length === 0
+      ? '<div style="font-size:10px;color:var(--text-tertiary);margin-top:4px">No price data yet — set may be too new for TCGPlayer</div>'
+      : '';
+
     div.innerHTML = `
       <img class="result-img" src="${escHtml(card.images?.small || '')}" alt="${escHtml(card.name)}">
       <div class="result-info">
         <div class="result-name">${escHtml(card.name)}</div>
         <div class="result-set">${escHtml(card.set?.name || '')} · #${escHtml(card.number || '')}</div>
         <div class="result-prices">${pricePills || '<span style="font-size:11px;color:var(--text-tertiary)">No price data</span>'}</div>
+        ${noPriceNote}
         ${finishBtns ? `<div class="finish-picker">${finishBtns}</div>` : ''}
-        <button class="quick-add-btn" data-action="quick-add">Quick Add</button>
+        <button class="quick-add-btn" data-action="quick-add">Quick add</button>
       </div>`;
-
-    // Build direct TCGPlayer product URL from productId
-    const productId = card.tcgplayer?.productId;
-    const directUrl = productId
-      ? `https://www.tcgplayer.com/product/${productId}`
-      : (card.tcgplayer?.url || '');
 
     div.dataset.cardJson = JSON.stringify({
       id: card.id, name: card.name,
       imageUrl: card.images?.large || card.images?.small || '',
       setName:  card.set?.name || '',
       tcgplayer: card.tcgplayer || null,
-      directUrl,
     });
 
     div.addEventListener('click', e => {
@@ -782,11 +920,7 @@ function selectResultCard(card, div) {
   div.classList.add('selected');
   const finish   = div.dataset.selectedFinish || Object.keys(card.tcgplayer?.prices || {})[0] || 'normal';
   const cardData = JSON.parse(div.dataset.cardJson);
-  selectedResult = {
-    cardId: card.id, cardData, finish,
-    prices: card.tcgplayer?.prices || {},
-    directUrl: cardData.directUrl || '',
-  };
+  selectedResult = { cardId: card.id, cardData, finish, prices: card.tcgplayer?.prices || {} };
   document.getElementById('add-selected-btn').disabled = false;
 }
 
@@ -801,7 +935,7 @@ async function doUrlLookup() {
   try {
     const card = await fetchCardByUrl(url);
     if (!card) {
-      statusEl.innerHTML = `<span style="color:var(--text-danger)">Could not find a matching Pokémon card.<br>Make sure it's a TCGPlayer product URL.</span>`;
+      statusEl.innerHTML = `<span style="color:var(--text-danger)">Could not find a matching Pokémon card. Make sure it's a TCGPlayer product URL.</span>`;
       return;
     }
     renderSearchResults([card]);
@@ -817,8 +951,6 @@ async function doUrlLookup() {
 function resetSearchUI() {
   selectedResult = null;
   const input = document.getElementById('search-input');
-  const setName = document.getElementById('set-filter-input');
-  if (setName) { setName.value = ''; }
   if (input) { input.value = ''; input.focus(); }
   const area = document.getElementById('search-results-area');
   if (area) area.innerHTML = '';
@@ -829,15 +961,15 @@ function showAddSuccess(name, setName) {
   const el  = document.getElementById('card-added');
   const btn = document.getElementById('add-selected-btn');
   if (!el) return;
-  el.textContent = `✓ ${name} from ${setName} was added to the list!`;
+  el.textContent   = `✓ ${name}${setName ? ' from ' + setName : ''} added!`;
   el.style.display = 'block';
   btn.disabled = true;
-  setTimeout(() => { btn.disabled = false; }, 1500);
+  setTimeout(() => { el.style.display = 'none'; btn.disabled = false; }, 1500);
 }
 
 function addSelectedCard() {
   if (!selectedResult) return;
-  const { cardData, finish, prices, directUrl } = selectedResult;
+  const { cardData, finish, prices } = selectedResult;
   const p      = prices[finish] || {};
   const editId = parseInt(document.getElementById('search-modal').dataset.editId, 10) || 0;
 
@@ -849,10 +981,11 @@ function addSelectedCard() {
     marketNM:    p.market ?? null,
     priceLow:    p.low    ?? null,
     priceMid:    p.mid    ?? null,
-    link:        directUrl || '',   // store the direct TCGPlayer product URL
+    link:        '',           // link column now always uses buildTCGSearchUrl at render time
     condition:   'NM',
     buyCost:     '',
     soldPrice:   '',
+    notes:       '',
     sold:        false,
     tcgplayerId: cardData.id,
   };
@@ -878,8 +1011,7 @@ async function triggerImport() {
   if (window.showOpenFilePicker) {
     try {
       const [fh] = await window.showOpenFilePicker({ types: [{ description: 'CSV files', accept: { 'text/csv': ['.csv'] } }], multiple: false });
-      const text = await (await fh.getFile()).text();
-      pendingCSVData = text;
+      pendingCSVData = await (await fh.getFile()).text();
       document.getElementById('import-modal').style.display = 'flex';
       return;
     } catch (err) { if (err.name === 'AbortError') return; }
@@ -907,17 +1039,25 @@ function doImport(mode) {
 
 async function handleExportCSV() { await downloadCSV(cards); }
 
-/* ============================================================
-   Cache controls
-   ============================================================ */
-
 function handleClearCache() {
   clearPriceCache(); updateCacheStatus();
   setStatus('Price cache cleared — next refresh will fetch from the API.', 'ok');
 }
 
 /* ============================================================
-   initUI — wire all static buttons (Option A)
+   How To modal (#3)
+   ============================================================ */
+
+function openHowTo() {
+  document.getElementById('howto-modal').style.display = 'flex';
+}
+
+function closeHowTo() {
+  document.getElementById('howto-modal').style.display = 'none';
+}
+
+/* ============================================================
+   initUI
    ============================================================ */
 
 function initUI() {
@@ -929,19 +1069,20 @@ function initUI() {
   document.getElementById('add-card-via-search-btn').addEventListener('click', () => openSearchModal());
   document.getElementById('clear-cache-btn').addEventListener('click', handleClearCache);
   document.getElementById('col-toggle-btn').addEventListener('click', e => { e.stopPropagation(); toggleColPanel(); });
+  document.getElementById('howto-btn').addEventListener('click', openHowTo);
+  document.getElementById('howto-close-x').addEventListener('click', closeHowTo);
+  document.getElementById('howto-close-footer').addEventListener('click', closeHowTo);
 
-  // Close col panel when clicking outside
+  // Close col panel on outside click
   document.addEventListener('click', e => {
-    if (colPanelOpen && !e.target.closest('#col-panel') && !e.target.closest('#col-toggle-btn')) {
-      closeColPanel();
-    }
+    if (colPanelOpen && !e.target.closest('#col-panel') && !e.target.closest('#col-toggle-btn')) closeColPanel();
   });
 
-  // Filter bar
+  // Filter
   document.getElementById('filter-input').addEventListener('input', onFilterInput);
   document.getElementById('filter-clear').addEventListener('click', clearFilter);
 
-  // Bulk toolbar
+  // Bulk
   document.getElementById('bulk-mark-sold').addEventListener('click', bulkMarkSold);
   document.getElementById('bulk-delete').addEventListener('click', bulkDelete);
 
@@ -950,32 +1091,27 @@ function initUI() {
   document.getElementById('do-import-btn').addEventListener('click', () => doImport('add'));
   document.getElementById('replace-import-btn').addEventListener('click', () => doImport('replace'));
 
-  // Search modal tabs
+  // Search modal
   document.getElementById('tabBtn-name').addEventListener('click', () => switchTab('name'));
   document.getElementById('tabBtn-url').addEventListener('click', () => switchTab('url'));
-
-  // JP toggle
   document.getElementById('jp-toggle').addEventListener('change', e => { searchJapanese = e.target.checked; });
-
-  // Name search
   document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   document.getElementById('set-filter-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   document.getElementById('search-btn').addEventListener('click', doSearch);
-
-  // URL lookup
   document.getElementById('url-input').addEventListener('keydown', e => { if (e.key === 'Enter') doUrlLookup(); });
   document.getElementById('url-lookup-btn').addEventListener('click', doUrlLookup);
-
-  // Search modal footer
   document.getElementById('close-search-btn').addEventListener('click', closeSearchModal);
   document.getElementById('add-selected-btn').addEventListener('click', addSelectedCard);
+
+  // Popover backdrop
+  document.getElementById('popover-backdrop').addEventListener('click', closePopover);
 
   // File input fallback
   document.getElementById('file-input').addEventListener('change', handleFileImport);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeSearchModal(); closeImportModal(); closeColPanel(); }
+    if (e.key === 'Escape') { closeSearchModal(); closeImportModal(); closeColPanel(); closePopover(); closeHowTo(); }
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
   });
 

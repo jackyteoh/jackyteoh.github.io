@@ -1,6 +1,6 @@
 /**
  * core.js — shared logic for the TCG Card Tracker.
- * ES module: all symbols are exported and imported directly.
+ * ES module; all symbols exported and imported directly.
  */
 
 /* ============================================================
@@ -26,13 +26,35 @@ export const FINISH_LABELS = {
 };
 
 // Fields persisted to CSV — order determines column order.
+// notes is added; no other fields removed (full backward compat).
 export const CSV_HEADERS = [
   'name', 'setName', 'finish', 'imageUrl', 'condition',
   'buyCost', 'soldPrice', 'marketNM', 'prevMarketNM', 'priceLow', 'priceMid',
-  'link', 'sold', 'tcgplayerId', 'dateAdded', 'lastUpdated',
+  'link', 'sold', 'tcgplayerId', 'notes', 'dateAdded', 'lastUpdated',
 ];
 
 const POKEMON_API = 'https://api.pokemontcg.io/v2/cards';
+
+/* ============================================================
+   TCGPlayer link builder (#1)
+   productId is no longer returned by the API, so we build a
+   search-results URL from card name + set name instead.
+   This lands the user one click away from the correct product.
+   ============================================================ */
+
+/**
+ * Build a direct TCGPlayer search URL for a card.
+ * Falls back to the stored link (e.g. from older imports) if name is empty.
+ * @param {string} name
+ * @param {string} [setName='']
+ * @param {string} [fallbackLink='']
+ * @returns {string}
+ */
+export function buildTCGSearchUrl(name, setName = '', fallbackLink = '') {
+  if (!name) return fallbackLink;
+  const q = [name, setName].filter(Boolean).join(' ');
+  return `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(q)}&view=grid`;
+}
 
 /* ============================================================
    Price cache (localStorage, TTL = 1 h)
@@ -63,7 +85,7 @@ export function writePriceCache(tcgplayerId, prices) {
       PRICE_CACHE_PREFIX + tcgplayerId,
       JSON.stringify({ prices, cachedAt: Date.now() })
     );
-  } catch { /* quota exceeded */ }
+  } catch { /* quota */ }
 }
 
 export function clearPriceCache() {
@@ -97,13 +119,6 @@ export function inspectPriceCache() {
 
 /* ── Search result cache ───────────────────────────────────── */
 
-/**
- * Build a stable cache key from the three search dimensions.
- * @param {string} query
- * @param {string} [setQuery='']
- * @param {boolean} [japanese=false]
- * @returns {string}
- */
 export function searchCacheKey(query, setQuery = '', japanese = false) {
   return SEARCH_CACHE_PREFIX +
     [query.toLowerCase().trim(), setQuery.toLowerCase().trim(), japanese ? 'jp' : 'en'].join('|');
@@ -125,7 +140,7 @@ export function readSearchCache(key) {
 export function writeSearchCache(key, results) {
   try {
     localStorage.setItem(key, JSON.stringify({ results, cachedAt: Date.now() }));
-  } catch { /* quota exceeded */ }
+  } catch { /* quota */ }
 }
 
 /* ============================================================
@@ -135,14 +150,14 @@ export function writeSearchCache(key, results) {
 let _nextId = 1;
 
 /**
- * Create a card object with sensible defaults.
- * New fields vs previous version:
- *   soldPrice    — user-entered actual sale price (empty by default)
- *   prevMarketNM — snapshot of marketNM before the last refresh (enables Δ display)
+ * Create a card with sensible defaults.
+ * New in this version: notes field.
+ * id is always a Number so strict === comparisons in find() work
+ * even after JSON round-trips through localStorage.
  */
 export function makeCard(overrides = {}) {
   const now = new Date().toISOString();
-  return {
+  const card = {
     id:            _nextId++,
     name:          '',
     imageUrl:      '',
@@ -158,11 +173,15 @@ export function makeCard(overrides = {}) {
     link:          '',
     sold:          false,
     tcgplayerId:   '',
+    notes:         '',
     lastRefreshed: null,
     dateAdded:     now,
     lastUpdated:   now,
     ...overrides,
   };
+  // Guarantee id is always a number regardless of what overrides contain
+  card.id = Number(card.id);
+  return card;
 }
 
 export function resetIdCounter() { _nextId = 1; }
@@ -175,16 +194,11 @@ export function touchUpdated(card) {
    Price calculations
    ============================================================ */
 
-/** Condition-adjusted market price. Falls back to priceMid, then 0. */
 export function adjPrice(card) {
   const base = card.marketNM ?? card.priceMid ?? 0;
   return base * (COND_MULT[card.condition] ?? 1);
 }
 
-/**
- * Expected profit — market-based, using adjPrice vs buyCost.
- * Used for unsold cards or when no soldPrice is set.
- */
 export function calcProfit(card) {
   const adj = adjPrice(card);
   const buy = parseFloat(card.buyCost) || 0;
@@ -193,10 +207,6 @@ export function calcProfit(card) {
   return { profit, pct: (profit / buy) * 100 };
 }
 
-/**
- * Actual profit — soldPrice vs buyCost.
- * Only meaningful when card.sold === true and soldPrice is set.
- */
 export function calcActualProfit(card) {
   const sold = parseFloat(card.soldPrice) || 0;
   const buy  = parseFloat(card.buyCost)   || 0;
@@ -205,10 +215,6 @@ export function calcActualProfit(card) {
   return { profit, pct: (profit / buy) * 100 };
 }
 
-/**
- * Price delta since the last refresh: marketNM − prevMarketNM.
- * Returns null when prevMarketNM is absent (no prior reading to compare to).
- */
 export function calcPriceDelta(card) {
   if (card.prevMarketNM == null || card.marketNM == null) return null;
   return card.marketNM - card.prevMarketNM;
@@ -222,11 +228,11 @@ export function sortCards(cards, key, dir) {
   const mul = dir === 'asc' ? 1 : -1;
   return [...cards].sort((a, b) => {
     let av = a[key], bv = b[key];
-    if (key === 'adjPrice')     { av = adjPrice(a);                     bv = adjPrice(b); }
-    if (key === 'profit')       { av = calcProfit(a).profit        ?? -Infinity; bv = calcProfit(b).profit        ?? -Infinity; }
-    if (key === 'pct')          { av = calcProfit(a).pct           ?? -Infinity; bv = calcProfit(b).pct           ?? -Infinity; }
-    if (key === 'priceDelta')   { av = calcPriceDelta(a)           ?? -Infinity; bv = calcPriceDelta(b)           ?? -Infinity; }
-    if (key === 'actualProfit') { av = calcActualProfit(a).profit  ?? -Infinity; bv = calcActualProfit(b).profit  ?? -Infinity; }
+    if (key === 'adjPrice')     { av = adjPrice(a);                    bv = adjPrice(b); }
+    if (key === 'profit')       { av = calcProfit(a).profit       ?? -Infinity; bv = calcProfit(b).profit       ?? -Infinity; }
+    if (key === 'pct')          { av = calcProfit(a).pct          ?? -Infinity; bv = calcProfit(b).pct          ?? -Infinity; }
+    if (key === 'priceDelta')   { av = calcPriceDelta(a)          ?? -Infinity; bv = calcPriceDelta(b)          ?? -Infinity; }
+    if (key === 'actualProfit') { av = calcActualProfit(a).profit ?? -Infinity; bv = calcActualProfit(b).profit ?? -Infinity; }
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
     const an = parseFloat(av), bn = parseFloat(bv);
@@ -243,7 +249,10 @@ export function sortCards(cards, key, dir) {
 
 export function fmt(n, decimals = 2) {
   if (n === null || n === undefined || isNaN(n)) return '—';
-  return '$' + Number(n).toFixed(decimals);
+  return '$' + n.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
 }
 
 export function fmtPct(n) {
@@ -342,11 +351,6 @@ export function splitCSVLine(line) {
   return result;
 }
 
-/**
- * Convert a parsed CSV row into a Card.
- * Gracefully handles sparse CSVs — only `name` is truly required.
- * All other fields fall back to safe defaults when absent.
- */
 export function csvRowToCard(row) {
   const now = new Date().toISOString();
   return makeCard({
@@ -364,6 +368,7 @@ export function csvRowToCard(row) {
     link:         row.link         || '',
     sold:         row.sold === 'true' || row.sold === '1',
     tcgplayerId:  row.tcgplayerId  || '',
+    notes:        row.notes        || '',
     dateAdded:    row.dateAdded    || now,
     lastUpdated:  row.lastUpdated  || now,
   });
@@ -374,11 +379,18 @@ export function csvRowToCard(row) {
    ============================================================ */
 
 /**
- * Search cards by name with optional set filter and Japanese language toggle.
- * Results are cached in localStorage for SEARCH_CACHE_TTL_MS (6 h).
+ * Search cards by name with optional set filter and JP mode.
  *
- * @param {string}  query          — card name
- * @param {string}  [setQuery='']  — optional set name substring
+ * Fixes vs previous version:
+ *  - JP mode: uses wildcard name:*query* (no language:Japanese — that field
+ *    doesn't exist in the API query syntax and caused 404 errors)
+ *  - EN mode: tries exact match first; if 0 results auto-retries with
+ *    wildcard name:*query* to catch promos, hyphenated names, etc.
+ *  - pageSize: 100 (was 50)
+ *  - Results cached for SEARCH_CACHE_TTL_MS (6 h)
+ *
+ * @param {string}  query
+ * @param {string}  [setQuery='']
  * @param {boolean} [japanese=false]
  */
 export async function searchCards(query, setQuery = '', japanese = false) {
@@ -386,28 +398,48 @@ export async function searchCards(query, setQuery = '', japanese = false) {
   const cached   = readSearchCache(cacheKey);
   if (cached) return cached;
 
-  // Build query string
-  // For Japanese cards the API stores names in Japanese script, so we use
-  // a wildcard name match and rely on language:Japanese to narrow results.
-  // For English we use an exact quoted match which is more precise.
-  let q = japanese
-    ? `name:*${query}* language:Japanese`
-    : `name:"${query}"`;
-  if (setQuery) q += ` set.name:"${setQuery}"`;
+  const setFilter = setQuery ? ` set.name:"${setQuery}"` : '';
 
-  // include full tcgplayer object so productId is available for direct URL construction
-  const url = `${POKEMON_API}?q=${encodeURIComponent(q)}&pageSize=50&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
-  const res  = await fetch(url);
+  // JP mode: wildcard name search (Japanese cards have romanised names in the DB)
+  if (japanese) {
+    const q   = `name:*${query}*${setFilter}`;
+    const url = `${POKEMON_API}?q=${encodeURIComponent(q)}&pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`API error ${res.status}`);
+    const json = await res.json();
+    const data = json.data || [];
+    writeSearchCache(cacheKey, data);
+    return data;
+  }
+
+  // EN mode: exact match first, wildcard fallback if no results
+  const exactQ   = `name:"${query}"${setFilter}`;
+  const exactUrl = `${POKEMON_API}?q=${encodeURIComponent(exactQ)}&pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
+  const res      = await fetch(exactUrl);
   if (!res.ok) throw new Error(`API error ${res.status}`);
   const json = await res.json();
-  const data = json.data || [];
+  let data   = json.data || [];
+
+  // Auto-retry with wildcard when exact match returns nothing
+  if (data.length === 0) {
+    const wildQ   = `name:*${query}*${setFilter}`;
+    const wildUrl = `${POKEMON_API}?q=${encodeURIComponent(wildQ)}&pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
+    try {
+      const res2  = await fetch(wildUrl);
+      if (res2.ok) {
+        const json2 = await res2.json();
+        data = json2.data || [];
+      }
+    } catch { /* fall through with empty */ }
+  }
+
   writeSearchCache(cacheKey, data);
   return data;
 }
 
 /**
- * Fetch prices for a single card, using localStorage cache when fresh.
- * forceRefresh=true bypasses the cache (used by the Refresh button).
+ * Fetch prices for a single card.
+ * forceRefresh=true bypasses the cache (Refresh button).
  */
 export async function fetchCardPrices(tcgplayerId, forceRefresh = false) {
   if (!forceRefresh) {
@@ -425,7 +457,7 @@ export async function fetchCardPrices(tcgplayerId, forceRefresh = false) {
 }
 
 /**
- * Resolve a TCGPlayer product URL to a Pokémon TCG API card object.
+ * Resolve a TCGPlayer URL to a Pokémon TCG API card object.
  * Strategy 1: numeric product ID → tcgplayer.productId query.
  * Strategy 2: slug-based name extraction fallback.
  */
@@ -464,15 +496,8 @@ export async function fetchCardByUrl(url) {
    Undo history
    ============================================================ */
 
-/** Maximum number of undo snapshots retained in memory. */
 export const UNDO_MAX_SNAPSHOTS = 5;
 
-/**
- * Deep-clone an array of cards for the undo stack.
- * Uses JSON round-trip — safe for all card field types (strings, numbers, booleans, null).
- * @param {Card[]} cards
- * @returns {Card[]}
- */
 export function snapshotCards(cards) {
   return JSON.parse(JSON.stringify(cards));
 }
@@ -484,9 +509,9 @@ export function snapshotCards(cards) {
 export function getSeedCards() {
   const daysAgo = (n) => { const t = new Date(); t.setDate(t.getDate() - n); return t.toISOString(); };
   return [
-    makeCard({ name:'Rayquaza VMAX', setName:'Evolving Skies', finish:'holofoil', condition:'NM',  buyCost:'30.00', soldPrice:'',    marketNM:52.00, prevMarketNM:48.00, priceLow:44.00, priceMid:49.00, imageUrl:'https://images.pokemontcg.io/swsh7/218_hires.png',  link:'https://www.tcgplayer.com/product/246733', tcgplayerId:'swsh7-218',  sold:false, dateAdded:daysAgo(60), lastUpdated:daysAgo(5)  }),
-    makeCard({ name:'Umbreon VMAX',  setName:'Evolving Skies', finish:'holofoil', condition:'NM',  buyCost:'38.00', soldPrice:'55.00', marketNM:60.00, prevMarketNM:62.00, priceLow:50.00, priceMid:56.00, imageUrl:'https://images.pokemontcg.io/swsh7/215_hires.png',  link:'https://www.tcgplayer.com/product/241597', tcgplayerId:'swsh7-215',  sold:true,  dateAdded:daysAgo(45), lastUpdated:daysAgo(7)  }),
-    makeCard({ name:'Lugia VSTAR',   setName:'Silver Tempest', finish:'holofoil', condition:'MP',  buyCost:'20.00', soldPrice:'',    marketNM:38.00, prevMarketNM:null,  priceLow:30.00, priceMid:35.00, imageUrl:'https://images.pokemontcg.io/swsh12/227_hires.png', link:'https://www.tcgplayer.com/product/268391', tcgplayerId:'swsh12-227', sold:false, dateAdded:daysAgo(20), lastUpdated:daysAgo(20) }),
-    makeCard({ name:'Mew VMAX',      setName:'Fusion Strike',  finish:'holofoil', condition:'NM',  buyCost:'16.00', soldPrice:'',    marketNM:22.00, prevMarketNM:20.00, priceLow:17.50, priceMid:20.00, imageUrl:'https://images.pokemontcg.io/swsh8/271_hires.png',  link:'https://www.tcgplayer.com/product/249454', tcgplayerId:'swsh8-271',  sold:false, dateAdded:daysAgo(8),  lastUpdated:daysAgo(8)  }),
+    makeCard({ name:'Rayquaza VMAX', setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'30.00', soldPrice:'',      marketNM:52.00, prevMarketNM:48.00, priceLow:44.00, priceMid:49.00, notes:'',                           imageUrl:'https://images.pokemontcg.io/swsh7/218_hires.png',  link:'', tcgplayerId:'swsh7-218',  sold:false, dateAdded:daysAgo(60), lastUpdated:daysAgo(5)  }),
+    makeCard({ name:'Umbreon VMAX',  setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'38.00', soldPrice:'55.00', marketNM:60.00, prevMarketNM:62.00, priceLow:50.00, priceMid:56.00, notes:'Sold on eBay, great buyer',  imageUrl:'https://images.pokemontcg.io/swsh7/215_hires.png',  link:'', tcgplayerId:'swsh7-215',  sold:true,  dateAdded:daysAgo(45), lastUpdated:daysAgo(7)  }),
+    makeCard({ name:'Lugia VSTAR',   setName:'Silver Tempest', finish:'holofoil', condition:'MP', buyCost:'20.00', soldPrice:'',      marketNM:38.00, prevMarketNM:null,  priceLow:30.00, priceMid:35.00, notes:'Light play, small crease',  imageUrl:'https://images.pokemontcg.io/swsh12/227_hires.png', link:'', tcgplayerId:'swsh12-227', sold:false, dateAdded:daysAgo(20), lastUpdated:daysAgo(20) }),
+    makeCard({ name:'Mew VMAX',      setName:'Fusion Strike',  finish:'holofoil', condition:'NM', buyCost:'16.00', soldPrice:'',      marketNM:22.00, prevMarketNM:20.00, priceLow:17.50, priceMid:20.00, notes:'',                           imageUrl:'https://images.pokemontcg.io/swsh8/271_hires.png',  link:'', tcgplayerId:'swsh8-271',  sold:false, dateAdded:daysAgo(8),  lastUpdated:daysAgo(8)  }),
   ];
 }
