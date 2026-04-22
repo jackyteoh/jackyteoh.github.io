@@ -76,19 +76,26 @@
     <!-- ── Filter bar ───────────────────────────────────────────────────── -->
     <div class="filter-bar">
       <div class="filter-input-wrap">
-        <svg class="filter-icon" width="14" height="14" viewBox="0 0 16 16" fill="none"
-             stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="6.5" cy="6.5" r="5"/><line x1="10.5" y1="10.5" x2="14" y2="14"/>
-        </svg>
         <input type="text" id="filter-input" placeholder="Filter by name or set…">
       </div>
       <button class="btn btn-sm" id="filter-clear">Clear</button>
+      <label class="skip-sold-label" title="Hide sold cards from the table"><input type="checkbox" id="hide-sold-cb"> Hide sold</label>
     </div>
 
     <!-- ── Bulk action toolbar ──────────────────────────────────────────── -->
     <div class="bulk-toolbar" id="bulk-toolbar" style="display:none">
       <span id="bulk-count" class="bulk-count">0 selected</span>
       <button class="btn btn-sm" id="bulk-mark-sold">Mark as sold</button>
+      <button class="btn btn-sm" id="bulk-unmark-sold">Unmark sold</button>
+      <select class="btn btn-sm" id="bulk-condition-select" title="Set condition for selected cards">
+        <option value="">Set condition…</option>
+        <option value="NM">NM</option>
+        <option value="LP">LP</option>
+        <option value="MP">MP</option>
+        <option value="HP">HP</option>
+        <option value="DMG">DMG</option>
+      </select>
+      <button class="btn btn-sm" id="bulk-refresh-btn">⟳ Refresh</button>
       <button class="btn btn-sm btn-danger" id="bulk-delete">Delete selected</button>
     </div>
 
@@ -132,7 +139,7 @@
         <button class="tab-btn" id="tabBtn-url">Paste TCGPlayer URL</button>
       </div>
       <div id="tab-name">
-        <p class="search-hint">Exact match first, wildcard fallback · results cached 6 h · up to 100 results</p>
+        <p class="search-hint">Exact match first, wildcard fallback · promo suffixes auto-stripped · cached 6 h</p>
         <div id="card-added" class="card-added-feedback" style="display:none"></div>
         <div class="search-input-wrap">
           <input type="text" id="search-input" placeholder="Card name, e.g. Charizard, Alakazam ex…">
@@ -157,7 +164,14 @@
         <div id="url-status" style="font-size:13px;margin-top:0.5rem;min-height:20px"></div>
         <p class="search-hint" style="margin-top:0.5rem">A successful lookup switches to the name tab for confirmation.</p>
       </div>
-      <div class="modal-actions">
+      <div class="search-modal-footer">
+        <label class="keep-results-label" title="Keep results after adding"><input type="checkbox" id="keep-results-cb"> Keep results</label>
+        <div class="qty-stepper" title="Copies to add">
+          <button class="qty-btn" id="qty-dec" aria-label="Decrease">−</button>
+          <input type="number" id="qty-input" value="1" min="1" max="99" aria-label="Quantity">
+          <button class="qty-btn" id="qty-inc" aria-label="Increase">+</button>
+        </div>
+        <div style="flex:1"></div>
         <button class="btn" id="close-search-btn">Close</button>
         <button class="btn btn-primary" id="add-selected-btn" disabled>Add to list</button>
       </div>

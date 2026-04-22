@@ -106,7 +106,6 @@ body { font-family:var(--font); font-size:14px; line-height:1.6; color:var(--tex
 /* ── Filter ──────────────────────────────────────────────────── */
 .filter-bar { display:flex; align-items:center; gap:8px; margin-bottom:0.75rem; }
 .filter-input-wrap { position:relative; flex:1; max-width:360px; }
-.filter-icon { position:absolute; left:9px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--text-tertiary); }
 .filter-input-wrap input { padding-left:30px; width:100%; }
 
 /* ── Bulk toolbar ────────────────────────────────────────────── */
@@ -503,3 +502,99 @@ kbd {
   color: var(--text-primary);
   white-space: nowrap;
 }
+
+/* ── v8 additions ─────────────────────────────────────────── */
+
+/* Per-row refresh button (#1) */
+.row-refresh-btn {
+  background: none; border: none; cursor: pointer;
+  padding: 3px 4px; border-radius: 4px;
+  color: var(--text-tertiary); font-size: 25px; line-height: 1;
+  display: inline-block;
+}
+.row-refresh-btn:hover   { color: var(--text-success); background: var(--bg-success); }
+.row-refresh-btn.spinning { animation: spin 0.85s linear infinite; }
+
+/* Qty stepper (#2) */
+.qty-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 0.5px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  height: 32px;
+}
+.qty-btn {
+  background: var(--bg-secondary);
+  border: none;
+  padding: 0 10px;
+  font-size: 16px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  height: 100%;
+  transition: background 0.1s;
+}
+.qty-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.qty-stepper input[type=number] {
+  width: 42px; text-align: center; border: none;
+  border-left: 0.5px solid var(--border-subtle);
+  border-right: 0.5px solid var(--border-subtle);
+  border-radius: 0; font-size: 13px; font-weight: 500;
+  background: var(--bg-primary);
+  height: 100%; padding: 0 4px;
+}
+/* Hide browser spinners on the qty input */
+.qty-stepper input[type=number]::-webkit-inner-spin-button,
+.qty-stepper input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.qty-stepper input[type=number] { -moz-appearance: textfield; }
+
+/* Search modal footer row (#2/#3) */
+.search-modal-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 0.5px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+/* Keep results toggle (#3) */
+.keep-results-label {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-secondary);
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.keep-results-label input[type=checkbox] { width: 14px; height: 14px; }
+
+/* ── v9: inline notes textarea (#13) ────────────────────── */
+.notes-inline {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 3px 5px;
+  font-size: 10px;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0.5px solid transparent;
+  border-radius: var(--radius-sm);
+  resize: none;
+  overflow: hidden;
+  min-height: 18px;
+  line-height: 1.4;
+  transition: border-color 0.12s, background 0.12s;
+}
+.notes-inline:focus {
+  outline: none;
+  border-color: var(--border-default);
+  background: var(--bg-secondary);
+  overflow: auto;
+  min-height: 38px;
+  color: var(--text-primary);
+}
+.notes-inline::placeholder { color: var(--text-tertiary); font-style: italic; }
+
+/* ── v9: bulk condition select ───────────────────────────── */
+.bulk-toolbar select { max-width: 130px; height: 28px; padding: 3px 8px; }

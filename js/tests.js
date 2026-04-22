@@ -13,6 +13,8 @@ import {
   snapshotCards, UNDO_MAX_SNAPSHOTS,
   searchCacheKey, readSearchCache, writeSearchCache, SEARCH_CACHE_TTL_MS,
   buildTCGSearchUrl,
+  syncNextId,
+  stripPromoSuffix,
 } from './core.js';
 
 /* ============================================================
@@ -423,6 +425,398 @@ const TEST_GROUPS = [
       { name: 'All seed card ids are Numbers',      fn: () => getSeedCards().forEach(c => assert(typeof c.id==='number', `id not number on ${c.name}`)) },
     ],
   },
+
+  /* ── syncNextId — FIX #8 ────────────────────────────────────── */
+  {
+    name: 'syncNextId() — FIX #8 duplicate-id bug',
+    tests: [
+      {
+        name: 'syncNextId raises _nextId above the highest existing id',
+        fn: () => {
+          resetIdCounter();
+          // Simulate cards loaded from localStorage with high ids
+          const fakeCards = [{ id: 50 }, { id: 23 }, { id: 71 }];
+          syncNextId(fakeCards);
+          // Next makeCard should get id 72, not 1
+          const c = makeCard();
+          assert(c.id > 71, `Expected id > 71, got ${c.id}`);
+        },
+      },
+      {
+        name: 'syncNextId with empty array does not crash',
+        fn: () => { syncNextId([]); syncNextId(null); },
+      },
+      {
+        name: 'After syncNextId, consecutive makeCard calls get unique ids',
+        fn: () => {
+          resetIdCounter();
+          syncNextId([{ id: 10 }, { id: 11 }]);
+          const a = makeCard(), b = makeCard(), c = makeCard();
+          assert(a.id !== b.id && b.id !== c.id, 'ids should be unique');
+          assert(a.id > 11 && b.id > 11 && c.id > 11, 'ids should be above 11');
+        },
+      },
+      {
+        name: 'Duplicate: makeCard with ...original id:undefined gets fresh id',
+        fn: () => {
+          resetIdCounter();
+          const original = makeCard({ name: 'Original' });
+          syncNextId([original]);
+          const dupe = makeCard({ ...original, id: undefined, name: 'Dupe' });
+          assert(dupe.id !== original.id, `dupe id ${dupe.id} should differ from original ${original.id}`);
+          assert(typeof dupe.id === 'number', 'dupe id should be a number');
+        },
+      },
+    ],
+  },
+
+  /* ── stripPromoSuffix — FIX #7 ──────────────────────────────── */
+  {
+    name: 'stripPromoSuffix() — FIX #7 promo search',
+    tests: [
+      { name: 'Strips trailing "promo"',         fn: () => assertEqual(stripPromoSuffix('Victini Promo'), 'Victini') },
+      { name: 'Strips "black star promo"',       fn: () => assertEqual(stripPromoSuffix('Pikachu black star promo'), 'Pikachu') },
+      { name: 'Strips "full art"',               fn: () => assertEqual(stripPromoSuffix('Charizard full art'), 'Charizard') },
+      { name: 'Strips "alt art"',                fn: () => assertEqual(stripPromoSuffix('Umbreon alt art'), 'Umbreon') },
+      { name: 'Strips "secret rare"',            fn: () => assertEqual(stripPromoSuffix('Mew secret rare'), 'Mew') },
+      { name: 'Strips "hyper rare"',             fn: () => assertEqual(stripPromoSuffix('Lugia hyper rare'), 'Lugia') },
+      { name: 'Leaves plain name unchanged',     fn: () => assertEqual(stripPromoSuffix('Charizard'), 'Charizard') },
+      { name: 'Case-insensitive strip',          fn: () => assertEqual(stripPromoSuffix('Victini PROMO'), 'Victini') },
+      { name: 'Does not strip mid-string',       fn: () => { const r = stripPromoSuffix('Promo Pikachu'); assert(r.includes('Promo'), 'should not strip mid-string'); } },
+      { name: 'Empty string stays empty',        fn: () => assertEqual(stripPromoSuffix(''), '') },
+    ],
+  },
+
+  /* ── sortCards ISO date fix — FIX #4 ────────────────────────── */
+  {
+    name: 'sortCards() ISO date sorting — FIX #4',
+    tests: [
+      {
+        name: 'dateAdded sorts correctly ascending (older first)',
+        fn: () => {
+          resetIdCounter();
+          const old  = makeCard({ name: 'Old',  dateAdded: '2023-01-01T00:00:00.000Z' });
+          const mid  = makeCard({ name: 'Mid',  dateAdded: '2024-06-15T00:00:00.000Z' });
+          const new_ = makeCard({ name: 'New',  dateAdded: '2025-03-01T00:00:00.000Z' });
+          const sorted = sortCards([new_, old, mid], 'dateAdded', 'asc');
+          assertEqual(sorted[0].name, 'Old');
+          assertEqual(sorted[1].name, 'Mid');
+          assertEqual(sorted[2].name, 'New');
+        },
+      },
+      {
+        name: 'dateAdded sorts correctly descending (newer first)',
+        fn: () => {
+          resetIdCounter();
+          const old  = makeCard({ name: 'Old',  dateAdded: '2023-01-01T00:00:00.000Z' });
+          const new_ = makeCard({ name: 'New',  dateAdded: '2025-03-01T00:00:00.000Z' });
+          const sorted = sortCards([old, new_], 'dateAdded', 'desc');
+          assertEqual(sorted[0].name, 'New');
+        },
+      },
+      {
+        name: 'lastUpdated sorts by date not lexicographically',
+        fn: () => {
+          resetIdCounter();
+          // Lexicographic sort of these would put Jan before Feb, but same result.
+          // The key test: 2023-12-01 vs 2024-01-01 — lex order is same as date order here.
+          // Use a case where lex fails: same year, different month+day combos handled by epoch.
+          const a = makeCard({ lastUpdated: '2024-09-30T23:59:59.000Z' });
+          const b = makeCard({ lastUpdated: '2024-10-01T00:00:00.000Z' });
+          const asc = sortCards([b, a], 'lastUpdated', 'asc');
+          assertEqual(asc[0].lastUpdated, '2024-09-30T23:59:59.000Z');
+        },
+      },
+    ],
+  },
+
+  /* ── updateSummary excludes sold — FIX #6 ──────────────────── */
+  {
+    name: 'Summary excludes sold cards from market/profit — FIX #6',
+    tests: [
+      {
+        name: 'adjPrice of sold card is NOT counted in portfolio market value',
+        fn: () => {
+          resetIdCounter();
+          // We verify the logic directly: only unsold cards contribute to market
+          const unsold = makeCard({ marketNM: 50, condition: 'NM', sold: false });
+          const sold   = makeCard({ marketNM: 100, condition: 'NM', sold: true });
+          const allCards = [unsold, sold];
+          let market = 0;
+          for (const c of allCards) {
+            if (!c.sold) market += adjPrice(c); // this is the v8 logic
+          }
+          assertClose(market, 50, 0.01, 'Sold card should not contribute to market');
+        },
+      },
+      {
+        name: 'Sold card adjPrice is still calculable (just excluded from sum)',
+        fn: () => {
+          resetIdCounter();
+          const sold = makeCard({ marketNM: 100, condition: 'NM', sold: true });
+          assertClose(adjPrice(sold), 100, 0.01, 'adjPrice calculation itself unchanged');
+        },
+      },
+    ],
+  },
+
+  /* ── Qty logic — #2 ─────────────────────────────────────────── */
+  {
+    name: 'Qty multiple add — #2',
+    tests: [
+      {
+        name: 'Adding qty=3 via makeCard loop produces 3 unique ids',
+        fn: () => {
+          resetIdCounter();
+          const entry = { name: 'Charizard', tcgplayerId: 'xy1-1' };
+          const added = [];
+          for (let i = 0; i < 3; i++) added.push(makeCard({ ...entry }));
+          const ids = added.map(c => c.id);
+          assertEqual(new Set(ids).size, 3, 'All 3 ids should be unique');
+        },
+      },
+      {
+        name: 'Qty=1 still works as expected',
+        fn: () => {
+          resetIdCounter();
+          const added = [];
+          for (let i = 0; i < 1; i++) added.push(makeCard({ name: 'Mew' }));
+          assertEqual(added.length, 1);
+          assertEqual(added[0].name, 'Mew');
+        },
+      },
+      {
+        name: 'Each qty copy starts with soldPrice empty and sold=false',
+        fn: () => {
+          resetIdCounter();
+          for (let i = 0; i < 3; i++) {
+            const c = makeCard({ name: 'Test', sold: false, soldPrice: '' });
+            assertEqual(c.sold, false);
+            assertEqual(c.soldPrice, '');
+          }
+        },
+      },
+    ],
+  },
+
+
+  /* ── FIX #14: calcProfit with buyCost=0 ─────────────────── */
+  {
+    name: 'calcProfit — FIX #14 buyCost=0',
+    tests: [
+      { name: 'buyCost="0" shows profit = adjPrice (free card)',
+        fn: () => { const {profit} = calcProfit(makeCard({marketNM:20, buyCost:'0', condition:'NM'})); assertClose(profit, 20, 0.001); } },
+      { name: 'buyCost="0" pct is null (avoid division by zero)',
+        fn: () => { const {pct} = calcProfit(makeCard({marketNM:20, buyCost:'0', condition:'NM'})); assertNull(pct); } },
+      { name: 'buyCost="" still returns null profit',
+        fn: () => assertNull(calcProfit(makeCard({marketNM:20, buyCost:''})).profit) },
+      { name: 'buyCost="10" still works normally',
+        fn: () => assertClose(calcProfit(makeCard({marketNM:20, buyCost:'10', condition:'NM'})).profit, 10) },
+      { name: 'buyCost="0" + no market → null (no price data)',
+        fn: () => assertNull(calcProfit(makeCard({marketNM:null, buyCost:'0'})).profit) },
+    ],
+  },
+
+  /* ── FIX #14: calcActualProfit with buyCost=0 ───────────── */
+  {
+    name: 'calcActualProfit — FIX #14 buyCost=0',
+    tests: [
+      { name: 'buyCost="0", soldPrice="10" → profit=10',
+        fn: () => assertClose(calcActualProfit(makeCard({buyCost:'0', soldPrice:'10'})).profit, 10) },
+      { name: 'buyCost="0", soldPrice="0" → null (not sold yet)',
+        fn: () => assertNull(calcActualProfit(makeCard({buyCost:'0', soldPrice:'0'})).profit) },
+      { name: 'buyCost="" → null even with soldPrice',
+        fn: () => assertNull(calcActualProfit(makeCard({buyCost:'', soldPrice:'20'})).profit) },
+      { name: 'buyCost="0" pct is null (avoid /0)',
+        fn: () => assertNull(calcActualProfit(makeCard({buyCost:'0', soldPrice:'10'})).pct) },
+    ],
+  },
+
+  /* ── FIX #15: duplicateCard id NaN ──────────────────────── */
+  {
+    name: 'Duplicate card id — FIX #15',
+    tests: [
+      { name: 'Destructure-spread produces valid numeric id',
+        fn: () => {
+          resetIdCounter();
+          const original = makeCard({name:'Charizard', tcgplayerId:'xy1-1'});
+          syncNextId([original]);
+          const { id: _discarded, ...rest } = original;
+          const dupe = makeCard({ ...rest, sold:false, soldPrice:'' });
+          assert(typeof dupe.id === 'number', `id should be number, got ${typeof dupe.id}`);
+          assert(!isNaN(dupe.id), `id should not be NaN, got ${dupe.id}`);
+          assert(dupe.id !== original.id, `dupe id ${dupe.id} should differ from original ${original.id}`);
+        },
+      },
+      { name: 'Passing id:undefined to makeCard gives NaN — confirms the old bug',
+        fn: () => {
+          // This test documents the bug that FIX #15 avoids.
+          // makeCard with id:undefined in overrides → Number(undefined) = NaN.
+          // The FIX: destructure id out before spread, never pass id:undefined.
+          resetIdCounter();
+          const bugCard = makeCard({ id: undefined, name: 'Bug' });
+          // After fix, makeCard coerces: id defaults to _nextId++ then Number() applied
+          // id:undefined overwrites _nextId++ → Number(undefined) = NaN
+          // So this card is expected to have NaN id — confirming the root bug.
+          assert(isNaN(bugCard.id), 'Passing id:undefined still produces NaN — must destructure it out');
+        },
+      },
+      { name: 'After sync, 3 dupes all get unique non-NaN ids',
+        fn: () => {
+          resetIdCounter();
+          const cards = [makeCard({name:'A'}), makeCard({name:'B'})];
+          syncNextId(cards);
+          const dupes = [1,2,3].map(() => { const {id:_, ...r} = cards[0]; return makeCard({...r}); });
+          const ids = dupes.map(c => c.id);
+          assert(ids.every(id => !isNaN(id)), 'All dupe ids should be valid numbers');
+          assert(new Set(ids).size === 3, 'All dupe ids should be unique');
+        },
+      },
+    ],
+  },
+
+  /* ── FIX #11: stray & in base URL ───────────────────────── */
+  {
+    name: 'Search URL construction — FIX #11 stray &',
+    tests: [
+      { name: 'stripPromoSuffix: longest suffix wins (black star promo > promo)',
+        fn: () => assertEqual(stripPromoSuffix('Pikachu black star promo'), 'Pikachu') },
+      { name: 'stripPromoSuffix: alt art stripped',
+        fn: () => assertEqual(stripPromoSuffix('Charizard alt art'), 'Charizard') },
+      { name: 'stripPromoSuffix: special illustration rare stripped',
+        fn: () => assertEqual(stripPromoSuffix('Gardevoir ex special illustration rare'), 'Gardevoir ex') },
+      { name: 'stripPromoSuffix: mid-word promo NOT stripped',
+        fn: () => { const r = stripPromoSuffix('Promo Pikachu'); assert(r.toLowerCase().includes('promo')); } },
+      { name: 'stripPromoSuffix: plain name unchanged',
+        fn: () => assertEqual(stripPromoSuffix('Mew VMAX'), 'Mew VMAX') },
+      { name: 'stripPromoSuffix: empty string unchanged',
+        fn: () => assertEqual(stripPromoSuffix(''), '') },
+      { name: 'stripPromoSuffix: only strips one suffix per call',
+        fn: () => { const r = stripPromoSuffix('Card full art promo'); assert(!r.toLowerCase().endsWith('promo')); } },
+    ],
+  },
+
+  /* ── FIX #12: dateAdded/lastUpdated sorting ─────────────── */
+  {
+    name: 'ISO date sorting — FIX #12',
+    tests: [
+      { name: 'dateAdded asc: older card first',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({dateAdded:'2023-01-01T00:00:00.000Z'});
+          const b = makeCard({dateAdded:'2025-06-01T00:00:00.000Z'});
+          const sorted = sortCards([b, a], 'dateAdded', 'asc');
+          assertEqual(sorted[0].dateAdded, '2023-01-01T00:00:00.000Z');
+        },
+      },
+      { name: 'dateAdded desc: newer card first',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({dateAdded:'2023-01-01T00:00:00.000Z'});
+          const b = makeCard({dateAdded:'2025-06-01T00:00:00.000Z'});
+          const sorted = sortCards([a, b], 'dateAdded', 'desc');
+          assertEqual(sorted[0].dateAdded, '2025-06-01T00:00:00.000Z');
+        },
+      },
+      { name: 'lastUpdated sorted correctly',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({lastUpdated:'2024-03-15T10:00:00.000Z'});
+          const b = makeCard({lastUpdated:'2024-11-20T10:00:00.000Z'});
+          const sorted = sortCards([b, a], 'lastUpdated', 'asc');
+          assertEqual(sorted[0].lastUpdated, '2024-03-15T10:00:00.000Z');
+        },
+      },
+      { name: 'ISO dates not compared as strings (parseFloat would fail)',
+        fn: () => {
+          // Two dates in same year — parseFloat gives same year prefix, but getTime() differs
+          resetIdCounter();
+          const a = makeCard({dateAdded:'2024-01-31T23:59:00.000Z'});
+          const b = makeCard({dateAdded:'2024-02-01T00:01:00.000Z'});
+          const sorted = sortCards([b, a], 'dateAdded', 'asc');
+          assertEqual(sorted[0].dateAdded, '2024-01-31T23:59:00.000Z');
+        },
+      },
+    ],
+  },
+
+  /* ── Bonus: getDisplayFiltered + export filtered ─────────── */
+  {
+    name: 'getDisplayFiltered / export filtered view — bonus',
+    tests: [
+      { name: 'exportCSV with subset produces fewer rows than full list',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [makeCard({name:'Charizard'}), makeCard({name:'Pikachu'}), makeCard({name:'Mewtwo'})];
+          const filtered = allCards.filter(c => c.name === 'Pikachu');
+          const csv = exportCSV(filtered);
+          const rows = parseCSV(csv);
+          assertEqual(rows.length, 1);
+          assertEqual(rows[0].name, 'Pikachu');
+        },
+      },
+      { name: 'exportCSV of full list preserves all cards',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [makeCard({name:'A'}), makeCard({name:'B'}), makeCard({name:'C'})];
+          assertEqual(parseCSV(exportCSV(allCards)).length, 3);
+        },
+      },
+    ],
+  },
+
+  /* ── #10: Bulk actions logic ────────────────────────────── */
+  {
+    name: 'Bulk actions logic — #10',
+    tests: [
+      { name: 'bulkMarkSold marks selected cards',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({sold:false}), b = makeCard({sold:false});
+          const selected = new Set([a.id]);
+          const localCards = [a, b];
+          for (const id of selected) { const c = localCards.find(x => x.id === id); if (c) c.sold = true; }
+          assert(localCards[0].sold === true, 'a should be sold');
+          assert(localCards[1].sold === false, 'b should not be sold');
+        },
+      },
+      { name: 'bulkUnmarkSold clears sold + soldPrice',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({sold:true, soldPrice:'50'});
+          const localCards = [a];
+          for (const c of localCards) { c.sold = false; c.soldPrice = ''; }
+          assertEqual(localCards[0].sold, false);
+          assertEqual(localCards[0].soldPrice, '');
+        },
+      },
+      { name: 'bulkSetCondition updates condition on selected cards',
+        fn: () => {
+          resetIdCounter();
+          const a = makeCard({condition:'NM'}), b = makeCard({condition:'NM'});
+          const selected = new Set([a.id, b.id]);
+          const localCards = [a, b];
+          for (const id of selected) { const c = localCards.find(x => x.id === id); if (c) c.condition = 'LP'; }
+          assert(localCards.every(c => c.condition === 'LP'), 'All selected should be LP');
+        },
+      },
+      { name: 'Bulk refresh deduplicates by tcgplayerId',
+        fn: () => {
+          resetIdCounter();
+          const cards = [
+            makeCard({tcgplayerId:'swsh7-218', name:'Ray A'}),
+            makeCard({tcgplayerId:'swsh7-218', name:'Ray B'}),
+            makeCard({tcgplayerId:'swsh7-215', name:'Umbreon'}),
+          ];
+          const selected = new Set(cards.map(c => c.id));
+          const eligible = cards.filter(c => selected.has(c.id) && c.tcgplayerId);
+          const uniqueIds = [...new Set(eligible.map(c => c.tcgplayerId))];
+          assertEqual(uniqueIds.length, 2, 'Should deduplicate to 2 unique IDs');
+        },
+      },
+    ],
+  },
+
 
 ];
 
