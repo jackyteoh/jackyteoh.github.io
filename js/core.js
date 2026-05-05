@@ -1,11 +1,16 @@
 /**
- * core.js — shared logic for the TCG Card Tracker.
- * ES module; all symbols exported.
+ * core.js — TCG Card Tracker  v11
  *
- * v9 changes:
- *  - FIX #11: removed stray `&` in API base URL (?& → ?)
- *  - FIX #14: calcProfit/calcActualProfit treat buyCost=0 correctly
- *  - stripPromoSuffix: longest-match-first so "black star promo" beats "promo"
+ * New this version:
+ *  - language: 'en' | 'jp' field on card model + CSV
+ *  - searchJPCards()          — TCGdex JP/EN language endpoints
+ *  - fetchJPCardPrices()      — TCGdex → TCGPlayer USD prices
+ *  - extractTCGdexTCGPlayerPrice() — safely pull USD from TCGdex pricing block
+ *  - parseTCGdexId()          — detect "tcgdex:" prefix for routing
+ *  - tcgdexVariantToFinish()  — map TCGdex variant flags → our finish keys
+ *  - finishToTCGdexVariant()  — reverse map for price lookup
+ *
+ * All English card logic (pokemontcg.io) unchanged.
  */
 
 export const CONDITIONS = ['NM', 'LP', 'MP', 'HP', 'DMG'];
@@ -20,13 +25,26 @@ export const FINISH_LABELS = {
   firstEditionNormal:   '1st Ed Normal',
 };
 
+// 'language' column added between 'notes' and 'dateAdded'.
+// Old CSVs without it import cleanly — csvRowToCard defaults to 'en'.
 export const CSV_HEADERS = [
   'name', 'setName', 'finish', 'imageUrl', 'condition',
   'buyCost', 'soldPrice', 'marketNM', 'prevMarketNM', 'priceLow', 'priceMid',
-  'link', 'sold', 'tcgplayerId', 'notes', 'dateAdded', 'lastUpdated',
+  'link', 'sold', 'tcgplayerId', 'notes', 'language', 'dateAdded', 'lastUpdated',
 ];
 
 const POKEMON_API = 'https://api.pokemontcg.io/v2/cards';
+const TCGDEX_API  = 'https://api.tcgdex.net/v2';
+
+/**
+ * Paste your Cloudflare Worker URL here after deploying proxy/worker.js.
+ * Leave empty to fall back to TCGdex (free, less complete).
+ * Example: 'https://tcg-tracker-proxy.yourname.workers.dev'
+ */
+export const PROXY_BASE_URL = '';
+
+/** Returns true when a proxy URL is configured. */
+export function proxyConfigured() { return typeof PROXY_BASE_URL === 'string' && PROXY_BASE_URL.trim().length > 0; }
 
 /* ── TCGPlayer link builder ──────────────────────────────── */
 export function buildTCGSearchUrl(name, setName = '', fallbackLink = '') {
@@ -35,28 +53,33 @@ export function buildTCGSearchUrl(name, setName = '', fallbackLink = '') {
   return `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(q)}&view=grid`;
 }
 
-/* ── Price cache ─────────────────────────────────────────── */
+/* ── Cache helpers ───────────────────────────────────────── */
 export const CACHE_TTL_MS        = 60 * 60 * 1000;
 export const SEARCH_CACHE_TTL_MS = 6  * 60 * 60 * 1000;
-const PRICE_CACHE_PREFIX  = 'tcg_price_';
-const SEARCH_CACHE_PREFIX = 'tcg_search_';
+export const PRICE_CACHE_PREFIX  = 'tcg_price_';
+const        SEARCH_CACHE_PREFIX = 'tcg_search_';
 
-export function readPriceCache(tcgplayerId) {
+export function readPriceCache(key) {
   try {
-    const raw = localStorage.getItem(PRICE_CACHE_PREFIX + tcgplayerId);
+    const raw = localStorage.getItem(PRICE_CACHE_PREFIX + key);
     if (!raw) return null;
     const entry = JSON.parse(raw);
-    if (Date.now() - entry.cachedAt > CACHE_TTL_MS) { localStorage.removeItem(PRICE_CACHE_PREFIX + tcgplayerId); return null; }
+    if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
+      localStorage.removeItem(PRICE_CACHE_PREFIX + key); return null;
+    }
     return entry;
   } catch { return null; }
 }
-export function writePriceCache(tcgplayerId, prices) {
-  try { localStorage.setItem(PRICE_CACHE_PREFIX + tcgplayerId, JSON.stringify({ prices, cachedAt: Date.now() })); } catch { /* quota */ }
+export function writePriceCache(key, prices) {
+  try { localStorage.setItem(PRICE_CACHE_PREFIX + key, JSON.stringify({ prices, cachedAt: Date.now() })); } catch { /* quota */ }
 }
 export function clearPriceCache() {
   try {
     const toRemove = [];
-    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith(PRICE_CACHE_PREFIX) || k?.startsWith(SEARCH_CACHE_PREFIX)) toRemove.push(k); }
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(PRICE_CACHE_PREFIX) || k?.startsWith(SEARCH_CACHE_PREFIX)) toRemove.push(k);
+    }
     toRemove.forEach(k => localStorage.removeItem(k));
   } catch { /* ignore */ }
 }
@@ -71,7 +94,6 @@ export function inspectPriceCache() {
   } catch { /* ignore */ }
   return { count, oldestAgeMs };
 }
-
 export function searchCacheKey(query, setQuery = '', japanese = false) {
   return SEARCH_CACHE_PREFIX + [query.toLowerCase().trim(), setQuery.toLowerCase().trim(), japanese ? 'jp' : 'en'].join('|');
 }
@@ -100,15 +122,16 @@ export function makeCard(overrides = {}) {
   const now = new Date().toISOString();
   const card = {
     id: _nextId++, name: '', imageUrl: '', setName: '', finish: 'normal',
-    condition: 'NM', buyCost: '', soldPrice: '', marketNM: null, prevMarketNM: null,
-    priceLow: null, priceMid: null, link: '', sold: false, tcgplayerId: '',
-    notes: '', lastRefreshed: null, dateAdded: now, lastUpdated: now,
+    condition: 'NM', buyCost: '', soldPrice: '',
+    marketNM: null, prevMarketNM: null, priceLow: null, priceMid: null,
+    link: '', sold: false, tcgplayerId: '',
+    notes: '', language: 'en',  // NEW: 'en' | 'jp'
+    lastRefreshed: null, dateAdded: now, lastUpdated: now,
     ...overrides,
   };
   card.id = Number(card.id);
   return card;
 }
-
 export function resetIdCounter() { _nextId = 1; }
 export function touchUpdated(card) { card.lastUpdated = new Date().toISOString(); }
 
@@ -117,11 +140,6 @@ export function adjPrice(card) {
   const base = card.marketNM ?? card.priceMid ?? 0;
   return base * (COND_MULT[card.condition] ?? 1);
 }
-
-/**
- * FIX #14: buyCost of '0' now correctly shows profit = adj price.
- * We check for empty/absent separately from numeric 0.
- */
 export function calcProfit(card) {
   const adj = adjPrice(card);
   if (!adj) return { profit: null, pct: null };
@@ -132,20 +150,15 @@ export function calcProfit(card) {
   const profit = adj - buy;
   return { profit, pct: buy > 0 ? (profit / buy) * 100 : null };
 }
-
-/**
- * FIX #14: same fix for soldPrice/buyCost of '0'.
- */
 export function calcActualProfit(card) {
   const soldStr = String(card.soldPrice ?? '').trim();
-  const buyStr  = String(card.buyCost  ?? '').trim();
+  const buyStr  = String(card.buyCost   ?? '').trim();
   if (soldStr === '' || buyStr === '') return { profit: null, pct: null };
   const sold = parseFloat(soldStr), buy = parseFloat(buyStr);
   if (isNaN(sold) || isNaN(buy) || sold === 0) return { profit: null, pct: null };
   const profit = sold - buy;
   return { profit, pct: buy > 0 ? (profit / buy) * 100 : null };
 }
-
 export function calcPriceDelta(card) {
   if (card.prevMarketNM == null || card.marketNM == null) return null;
   return card.marketNM - card.prevMarketNM;
@@ -153,7 +166,6 @@ export function calcPriceDelta(card) {
 
 /* ── Sorting ─────────────────────────────────────────────── */
 function isISODate(v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v); }
-
 export function sortCards(cards, key, dir) {
   const mul = dir === 'asc' ? 1 : -1;
   return [...cards].sort((a, b) => {
@@ -179,26 +191,16 @@ export function fmt(n, decimals = 2) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
-export function fmtPct(n) {
-  if (n === null || isNaN(n)) return '—';
-  return (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
-}
-export function fmtTime(ts) {
-  if (!ts) return 'never';
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
+export function fmtPct(n) { if (n === null || isNaN(n)) return '—'; return (n >= 0 ? '+' : '') + n.toFixed(1) + '%'; }
+export function fmtTime(ts) { if (!ts) return 'never'; return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 export function fmtDate(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d)) return '—';
+  if (!iso) return '—'; const d = new Date(iso); if (isNaN(d)) return '—';
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 export function fmtAge(ms) {
   if (ms === null || ms === undefined) return 'never';
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
+  const secs = Math.floor(ms / 1000); if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60); if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60), rem = mins % 60;
   return rem > 0 ? `${hrs}h ${rem}m ago` : `${hrs}h ago`;
 }
@@ -230,8 +232,7 @@ export async function downloadCSV(cards) {
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(a.href);
 }
 export function parseCSV(text) {
-  const lines = text.trim().split('\n');
-  if (lines.length < 2) return [];
+  const lines = text.trim().split('\n'); if (lines.length < 2) return [];
   const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   return lines.slice(1).map(line => { const vals = splitCSVLine(line); const obj = {}; headers.forEach((h, i) => { obj[h] = (vals[i] ?? '').trim(); }); return obj; });
 }
@@ -257,62 +258,52 @@ export function csvRowToCard(row) {
     priceMid:     row.priceMid     ? parseFloat(row.priceMid)     : null,
     link: row.link || '', sold: row.sold === 'true' || row.sold === '1',
     tcgplayerId: row.tcgplayerId || '', notes: row.notes || '',
+    language: row.language === 'jp' ? 'jp' : 'en',
     dateAdded: row.dateAdded || now, lastUpdated: row.lastUpdated || now,
   });
 }
 
-/* ── Pokémon TCG API search ──────────────────────────────── */
+/* ============================================================
+   English card search — pokemontcg.io  (UNCHANGED)
+   ============================================================ */
 
-/**
- * FIX #11: suffixes sorted longest-first so "black star promo" beats "promo".
- */
 const PROMO_SUFFIXES = [
   'special illustration rare', 'illustration rare',
   'black star promo', 'alternate art', 'rainbow rare',
   'secret rare', 'hyper rare', 'gold rare',
   'full art', 'alt art', 'promo',
 ];
-
 export function stripPromoSuffix(query) {
   const sorted = [...PROMO_SUFFIXES].sort((a, b) => b.length - a.length);
-  let q = query.trim();
-  const lower = q.toLowerCase();
+  let q = query.trim(); const lower = q.toLowerCase();
   for (const suffix of sorted) {
     if (lower.endsWith(' ' + suffix)) { q = q.slice(0, q.length - suffix.length - 1).trimEnd(); break; }
   }
   return q;
 }
 
-/**
- * FIX #11: base URL now uses `?pageSize=` (no stray `&`).
- */
-export async function searchCards(query, setQuery = '', japanese = false) {
+/** Search pokemontcg.io. promoOnly adds rarity:Promo filter (Promo is a rarity, not a subtype). */
+export async function searchCards(query, setQuery = '', promoOnly = false) {
   const cleaned  = stripPromoSuffix(query);
-  const cacheKey = searchCacheKey(cleaned, setQuery, japanese);
+  const cacheKey = searchCacheKey(cleaned, setQuery, promoOnly);
   const cached   = readSearchCache(cacheKey);
   if (cached) return cached;
 
-  // FIX #11: was `?&pageSize=` — stray & caused malformed requests
-  const setFilter = setQuery ? ` set.name:"${setQuery}"` : '';
-  const base      = `${POKEMON_API}?pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
+  const setFilter   = setQuery  ? ` set.name:"${setQuery}"` : '';
+  const promoFilter = promoOnly ? ' rarity:Promo'            : '';
+  const base        = `${POKEMON_API}?pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
 
-  if (japanese) {
-    const q = `name:*${cleaned}*${setFilter}`;
-    const res = await fetch(`${base}&q=${encodeURIComponent(q)}`);
-    if (!res.ok) throw new Error(`API error ${res.status}`);
-    const data = (await res.json()).data || [];
-    writeSearchCache(cacheKey, data);
-    return data;
-  }
-
-  const exactRes = await fetch(`${base}&q=${encodeURIComponent(`name:"${cleaned}"${setFilter}`)}`);
+  const exactRes = await fetch(`${base}&q=${encodeURIComponent(`name:"${cleaned}"${setFilter}${promoFilter}`)}`);
   if (!exactRes.ok) throw new Error(`API error ${exactRes.status}`);
   let data = (await exactRes.json()).data || [];
 
-  if (data.length === 0) {
+  if (data.length === 0 || promoOnly) {
     try {
-      const wildRes = await fetch(`${base}&q=${encodeURIComponent(`name:*${cleaned}*${setFilter}`)}`);
-      if (wildRes.ok) data = (await wildRes.json()).data || [];
+      const wildRes = await fetch(`${base}&q=${encodeURIComponent(`name:*${cleaned}*${setFilter}${promoFilter}`)}`);
+      if (wildRes.ok) {
+        const wildData = (await wildRes.json()).data || [];
+        if (promoOnly || data.length === 0) data = wildData;
+      }
     } catch { /* fall through */ }
   }
 
@@ -320,6 +311,7 @@ export async function searchCards(query, setQuery = '', japanese = false) {
   return data;
 }
 
+/** Fetch prices for an English card via pokemontcg.io. */
 export async function fetchCardPrices(tcgplayerId, forceRefresh = false) {
   if (!forceRefresh) { const cached = readPriceCache(tcgplayerId); if (cached) return cached.prices; }
   try {
@@ -354,17 +346,293 @@ export async function fetchCardByUrl(url) {
   return null;
 }
 
+/* ============================================================
+   TCGdex — Japanese card search + TCGPlayer USD price fetch
+   https://api.tcgdex.net   (free, no API key required)
+
+   TCGdex is a multilingual Pokémon TCG database that includes
+   Japanese sets absent from pokemontcg.io.
+
+   Pricing: TCGdex aggregates from TCGPlayer (USD) and Cardmarket (EUR).
+   We extract ONLY TCGPlayer USD pricing for currency consistency.
+   Cards with no TCGPlayer listing (true JP-only releases) will have
+   null prices and can still be tracked with a manually entered buy cost.
+
+   ID storage: "tcgdex:<setId>-<localId>" in the tcgplayerId field,
+   e.g. "tcgdex:sv6a-1". The "tcgdex:" prefix lets the refresh router
+   call fetchJPCardPrices instead of fetchCardPrices.
+   ============================================================ */
+
+/**
+ * Detect a JP card and return its raw TCGdex ID, or null for EN cards.
+ * @param {string} tcgplayerId
+ * @returns {string|null}
+ */
+export function parseTCGdexId(tcgplayerId) {
+  if (typeof tcgplayerId === 'string' && tcgplayerId.startsWith('tcgdex:')) {
+    return tcgplayerId.slice(7);
+  }
+  return null;
+}
+
+/**
+ * Map TCGdex variant flags to our FINISH_LABELS key.
+ * @param {object} variants — e.g. { holo: true, reverse: false, ... }
+ */
+export function tcgdexVariantToFinish(variants = {}) {
+  if (variants.firstEdition && variants.holo) return 'firstEditionHolofoil';
+  if (variants.firstEdition) return 'firstEditionNormal';
+  if (variants.holo)         return 'holofoil';
+  if (variants.reverse)      return 'reverseHolofoil';
+  return 'normal';
+}
+
+/**
+ * Map our finish key to the TCGdex pricing variant name.
+ * @param {string} finish
+ */
+export function finishToTCGdexVariant(finish) {
+  return { holofoil: 'holo', reverseHolofoil: 'reverse', firstEditionHolofoil: 'holo', firstEditionNormal: 'normal', normal: 'normal' }[finish] || 'normal';
+}
+
+/**
+ * Extract TCGPlayer USD prices from a full TCGdex card object.
+ * Tries the finish-matched variant first, then any variant with data.
+ * Returns null when the card has no TCGPlayer listing at all.
+ *
+ * @param {object} cardFull  — full card from /v2/en/cards/:id
+ * @param {string} finish    — our finish key
+ * @returns {{market: number, low: number|null, mid: number|null}|null}
+ */
+export function extractTCGdexTCGPlayerPrice(cardFull, finish = 'normal') {
+  const tcp = cardFull?.pricing?.tcgplayer;
+  if (!tcp) return null;
+  const preferred  = finishToTCGdexVariant(finish);
+  const candidates = [preferred, 'holo', 'normal', 'reverse', 'firstEdition'].filter((v, i, a) => a.indexOf(v) === i);
+  for (const v of candidates) {
+    const p = tcp[v];
+    if (p?.marketPrice != null) {
+      return { market: p.marketPrice, low: p.lowPrice ?? null, mid: p.midPrice ?? null };
+    }
+  }
+  return null;
+}
+
+/** Normalise a TCGdex list-endpoint card into our standard search result shape. */
+function normaliseTCGdexCard(c) {
+  const setId    = c.set?.id || c.setId || '';
+  const localId  = c.localId || c.number || '';
+  const tcgdexId = `${setId}-${localId}`;
+  return {
+    id:     `tcgdex:${tcgdexId}`,
+    name:   c.name || '',
+    number: localId,
+    images: {
+      small: c.image ? `${c.image}/low.webp`  : '',
+      large: c.image ? `${c.image}/high.webp` : '',
+    },
+    set: { id: setId, name: c.set?.name || setId },
+    tcgplayer:     null,            // populated after card is added
+    _tcgdexFinish: tcgdexVariantToFinish(c.variants || {}),
+    _tcgdexId:     tcgdexId,
+  };
+}
+
+/**
+ * Search Japanese cards via TCGdex.
+ *
+ * Strategy:
+ *  1. Hit the Japanese-language endpoint so names are in Japanese.
+ *  2. If 0 results, fall back to English endpoint (some older sets
+ *     are only indexed under EN names in TCGdex).
+ *  Results cached for SEARCH_CACHE_TTL_MS under the 'jp' cache slot.
+ *
+ * @param {string} query     — name in English or Japanese
+ * @param {string} [setQuery]
+ */
+/**
+ * Search Japanese cards.
+ *
+ * Routing:
+ *  - If PROXY_BASE_URL is set → JustTCG via Cloudflare Worker proxy
+ *    (comprehensive data, real pricing, full JP set coverage)
+ *  - Otherwise → TCGdex fallback (free, no key, partial JP coverage)
+ *
+ * Both paths return the same normalised card shape so the rest of the
+ * app doesn't need to know which source was used.
+ */
+export async function searchJPCards(query, setQuery = '') {
+  const cleaned  = stripPromoSuffix(query);
+  const cacheKey = searchCacheKey(cleaned, setQuery, true);
+  const cached   = readSearchCache(cacheKey);
+  if (cached) return cached;
+
+  // ── Path A: JustTCG proxy ──────────────────────────────────────
+  if (proxyConfigured()) {
+    try {
+      const params = new URLSearchParams({ q: cleaned });
+      if (setQuery) params.set('set', setQuery);
+      const res = await fetch(`${PROXY_BASE_URL.trim()}/jp/search?${params}`);
+      if (res.ok) {
+        const json = await res.json();
+        const data = (json.cards || []).map(normaliseJustTCGCard);
+        writeSearchCache(cacheKey, data);
+        return data;
+      }
+    } catch { /* fall through to TCGdex */ }
+  }
+
+  // ── Path B: TCGdex fallback ────────────────────────────────────
+  const nameFilter = `name=like:${encodeURIComponent(cleaned)}`;
+  const setFilter  = setQuery ? `&set.name=like:${encodeURIComponent(setQuery)}` : '';
+  const pagination = `&sort:field=localId&sort:order=DESC&pagination:page=1&pagination:itemsPerPage=80`;
+
+  let raw = [];
+  try {
+    const res = await fetch(`${TCGDEX_API}/ja/cards?${nameFilter}${setFilter}${pagination}`);
+    if (res.ok) { const j = await res.json(); raw = Array.isArray(j) ? j : []; }
+  } catch { /* network error */ }
+
+  if (raw.length === 0) {
+    try {
+      const res = await fetch(`${TCGDEX_API}/en/cards?${nameFilter}${setFilter}${pagination}`);
+      if (res.ok) { const j = await res.json(); raw = Array.isArray(j) ? j : []; }
+    } catch { /* network error */ }
+  }
+
+  const data = raw.map(normaliseTCGdexCard);
+  writeSearchCache(cacheKey, data);
+  return data;
+}
+
+/**
+ * Fetch available JP sets from the proxy (JustTCG).
+ * Returns [] when proxy is not configured.
+ * @returns {Promise<Array<{id, name, releaseDate, cardCount}>>}
+ */
+export async function fetchJPSets() {
+  if (!proxyConfigured()) return [];
+  try {
+    const res = await fetch(`${PROXY_BASE_URL.trim()}/jp/sets`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch { return []; }
+}
+
+/**
+ * Fetch TCGPlayer USD prices for a JP card via TCGdex.
+ * Always uses the English endpoint (pricing is only on EN card objects).
+ * Caches the full card object for 1 hour.
+ *
+ * @param {string}  tcgdexId      — raw ID, e.g. "sv6a-1" (no "tcgdex:" prefix)
+ * @param {string}  [finish]
+ * @param {boolean} [forceRefresh]
+ * @returns {Promise<{market, low, mid}|null>}
+ */
+/**
+ * Fetch TCGPlayer USD prices for a JP card.
+ *
+ * Routing:
+ *  - Proxy configured → JustTCG via Worker (best coverage + real pricing)
+ *    tcgdexId may be a JustTCG card id (stored in tcgplayerId after search)
+ *  - No proxy → TCGdex English endpoint (partial coverage)
+ *
+ * @param {string}  cardId        raw id (no "tcgdex:" prefix)
+ * @param {string}  [finish]      our finish key → mapped to printing
+ * @param {boolean} [forceRefresh]
+ * @returns {Promise<{market, low, mid}|null>}
+ */
+export async function fetchJPCardPrices(cardId, finish = 'normal', forceRefresh = false) {
+  const storageKey = PRICE_CACHE_PREFIX + 'jp:' + cardId;
+
+  if (!forceRefresh) {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const entry = JSON.parse(raw);
+        if (Date.now() - entry.cachedAt <= CACHE_TTL_MS) return entry.prices;
+        localStorage.removeItem(storageKey);
+      }
+    } catch { /* corrupt */ }
+  }
+
+  // ── Path A: JustTCG proxy ──────────────────────────────────────
+  if (proxyConfigured()) {
+    try {
+      const printing = finishToJustTCGPrinting(finish);
+      const params   = new URLSearchParams({ id: cardId, printing, condition: 'NM' });
+      const res      = await fetch(`${PROXY_BASE_URL.trim()}/jp/prices?${params}`);
+      if (res.ok) {
+        const data   = await res.json();
+        const prices = { market: data.market, low: data.low, mid: data.mid };
+        try { localStorage.setItem(storageKey, JSON.stringify({ prices, cachedAt: Date.now() })); } catch { /* quota */ }
+        return prices.market != null ? prices : null;
+      }
+    } catch { /* fall through to TCGdex */ }
+  }
+
+  // ── Path B: TCGdex fallback ────────────────────────────────────
+  try {
+    const res = await fetch(`${TCGDEX_API}/en/cards/${encodeURIComponent(cardId)}`);
+    if (!res.ok) return null;
+    const cardFull = await res.json();
+    const prices   = extractTCGdexTCGPlayerPrice(cardFull, finish);
+    if (prices) {
+      try { localStorage.setItem(storageKey, JSON.stringify({ prices, cachedAt: Date.now() })); } catch { /* quota */ }
+    }
+    return prices;
+  } catch { return null; }
+}
+
+/**
+ * Map our finish keys to JustTCG printing names.
+ * JustTCG uses: "Holofoil", "Reverse Holofoil", "Normal", "1st Edition Holofoil", etc.
+ */
+export function finishToJustTCGPrinting(finish) {
+  return {
+    holofoil:             'Holofoil',
+    reverseHolofoil:      'Reverse Holofoil',
+    firstEditionHolofoil: '1st Edition Holofoil',
+    firstEditionNormal:   '1st Edition Normal',
+    normal:               'Normal',
+  }[finish] || 'Normal';
+}
+
+/**
+ * Normalise a JustTCG card (from proxy /jp/search) into our standard search result shape.
+ * Shape matches normaliseTCGdexCard output so renderSearchResults works unchanged.
+ */
+function normaliseJustTCGCard(c) {
+  return {
+    // Store JustTCG card id with the tcgdex: prefix so the refresh router knows
+    id:     `tcgdex:${c.id}`,
+    name:   c.name    || '',
+    number: c.number  || '',
+    images: {
+      small: c.imageUrl || '',
+      large: c.imageUrl || '',
+    },
+    set: { id: c.setId || '', name: c.setName || '' },
+    tcgplayer:      null,
+    _tcgdexFinish:  'normal',   // JustTCG doesn't expose variant flags at search level
+    _tcgdexId:      c.id,
+    _printings:     c.printings || [],      // available printing types for this card
+    _marketPreview: c.marketPreview || null, // best NM price for display
+    _source:        'justtcg',
+  };
+}
+
 /* ── Undo ────────────────────────────────────────────────── */
 export const UNDO_MAX_SNAPSHOTS = 5;
 export function snapshotCards(cards) { return JSON.parse(JSON.stringify(cards)); }
 
 /* ── Seed data ───────────────────────────────────────────── */
 export function getSeedCards() {
-  const daysAgo = (n) => { const t = new Date(); t.setDate(t.getDate() - n); return t.toISOString(); };
+  const daysAgo = n => { const t = new Date(); t.setDate(t.getDate() - n); return t.toISOString(); };
   return [
-    makeCard({ name:'Rayquaza VMAX', setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'30.00', soldPrice:'',      marketNM:52.00, prevMarketNM:48.00, priceLow:44.00, priceMid:49.00, notes:'',                          imageUrl:'https://images.pokemontcg.io/swsh7/218_hires.png',  link:'', tcgplayerId:'swsh7-218',  sold:false, dateAdded:daysAgo(60), lastUpdated:daysAgo(5)  }),
-    makeCard({ name:'Umbreon VMAX',  setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'38.00', soldPrice:'55.00', marketNM:60.00, prevMarketNM:62.00, priceLow:50.00, priceMid:56.00, notes:'Sold on eBay, great buyer', imageUrl:'https://images.pokemontcg.io/swsh7/215_hires.png',  link:'', tcgplayerId:'swsh7-215',  sold:true,  dateAdded:daysAgo(45), lastUpdated:daysAgo(7)  }),
-    makeCard({ name:'Lugia VSTAR',   setName:'Silver Tempest', finish:'holofoil', condition:'MP', buyCost:'20.00', soldPrice:'',      marketNM:38.00, prevMarketNM:null,  priceLow:30.00, priceMid:35.00, notes:'Light play, small crease', imageUrl:'https://images.pokemontcg.io/swsh12/227_hires.png', link:'', tcgplayerId:'swsh12-227', sold:false, dateAdded:daysAgo(20), lastUpdated:daysAgo(20) }),
-    makeCard({ name:'Mew VMAX',      setName:'Fusion Strike',  finish:'holofoil', condition:'NM', buyCost:'16.00', soldPrice:'',      marketNM:22.00, prevMarketNM:20.00, priceLow:17.50, priceMid:20.00, notes:'',                          imageUrl:'https://images.pokemontcg.io/swsh8/271_hires.png',  link:'', tcgplayerId:'swsh8-271',  sold:false, dateAdded:daysAgo(8),  lastUpdated:daysAgo(8)  }),
+    makeCard({ name:'Rayquaza VMAX', setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'30.00', soldPrice:'',      marketNM:52.00, prevMarketNM:48.00, priceLow:44.00, priceMid:49.00, notes:'',                          language:'en', imageUrl:'https://images.pokemontcg.io/swsh7/218_hires.png',  link:'', tcgplayerId:'swsh7-218',  sold:false, dateAdded:daysAgo(60), lastUpdated:daysAgo(5)  }),
+    makeCard({ name:'Umbreon VMAX',  setName:'Evolving Skies', finish:'holofoil', condition:'NM', buyCost:'38.00', soldPrice:'55.00', marketNM:60.00, prevMarketNM:62.00, priceLow:50.00, priceMid:56.00, notes:'Sold on eBay, great buyer', language:'en', imageUrl:'https://images.pokemontcg.io/swsh7/215_hires.png',  link:'', tcgplayerId:'swsh7-215',  sold:true,  dateAdded:daysAgo(45), lastUpdated:daysAgo(7)  }),
+    makeCard({ name:'Lugia VSTAR',   setName:'Silver Tempest', finish:'holofoil', condition:'MP', buyCost:'20.00', soldPrice:'',      marketNM:38.00, prevMarketNM:null,  priceLow:30.00, priceMid:35.00, notes:'Light play, small crease', language:'en', imageUrl:'https://images.pokemontcg.io/swsh12/227_hires.png', link:'', tcgplayerId:'swsh12-227', sold:false, dateAdded:daysAgo(20), lastUpdated:daysAgo(20) }),
+    makeCard({ name:'Mew VMAX',      setName:'Fusion Strike',  finish:'holofoil', condition:'NM', buyCost:'16.00', soldPrice:'',      marketNM:22.00, prevMarketNM:20.00, priceLow:17.50, priceMid:20.00, notes:'',                          language:'en', imageUrl:'https://images.pokemontcg.io/swsh8/271_hires.png',  link:'', tcgplayerId:'swsh8-271',  sold:false, dateAdded:daysAgo(8),  lastUpdated:daysAgo(8)  }),
   ];
 }

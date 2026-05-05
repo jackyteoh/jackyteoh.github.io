@@ -6,18 +6,16 @@ A browser-based Pokémon TCG card tracker with live prices from the
 ## What's new in this version
 
 ### Features added
-1. **Duplicate entry bug** — fix: fixed the duplicate entry bug where it was not its unique id and you couldn't perform actions on it. This now works as expected
-2. **Sorting by Date added** —  fix: modified how date added is stored and added sorting feature so you can have it ascending/descending
-3. **Japanese/Promo searching** — fix: CURRENTLY NOT WORKING AS EXPECTED, STILL NEED TO FIX.
-4. **Excluding sold cards from market price summary** — fix: removing the sold card's market price from summary as it's not in your current inventory anymore
-5. **Profit delta in summary window** — fix: added expected profit delta indicator in expected profit summary window, to see if your expected profit increases/decreases since last refresh
-6. **Single & Multi refresh** — feat: added option to refresh one singular row or multiple rows in case one/mulitple fail on fetch all. Also if you just want to check a certain card(s).
-7. **Qty when adding** — feat: added Qty field for the user when adding multiple cards to optimize UX
-8. **Keep results toggle** — feat: added Keep Results checkbox during search ex: if user is searching for multiple cards from the same set, they won't have to keep resetting search
-9. **Hide sold toggle** — feat: added a hide sold button to hide sold entries from the view, unclogging user view
-10. **In-line note editing** — fix: originally adding/editing notes was only in the quick-edit window, now you can do it in-line.
-11. **Multi unmark sold, condition** — fix: extended the multi select functionality to work for setting conditions and also unchecking sold
-12. **Buy cost 0** — fix: allows buy cost to be set to 0
+1. **Loading skeletons in search results** — feature: shimmer placeholder cards that gives the user a sense of the search happening
+2. **JP Search options** —  fix: routed JP search to another database, still need to set up proxy, CURRENTLY NOT FULLY WORKING
+3. **Source badge** — feature: adding source the market price was pulled from underneath the market price so the user is aware of where it came from (TCGPlayer, etc)
+4. **Stale price indicator** — feature: indicator to the user when a card has not been refreshed in over 24 hours
+5. **Search result count** — feature: Adding number of cards returned by search
+6. **Top/Bottom jump buttons** — feature: added Jump to top/bottom of the list buttons so the user can easily get to the respective areas if they have a long list
+7. **Scroll to new when adding** — feature: Auto scrolls to the newest card when adding new cards
+8. **Row count in filter bar** — feature: Adding some metrics to indicate to the user how many cards are being shown of X cards
+9. **Toast notifications** — feature: Adding toast notifcation popups for the user so they see success/failure messages when performing actions
+10. **Other UX Changes** — Sticky summary bar, buy cost auto-focus, export button label, unsaved changes warning, popover tab order, and better empty filter state
 
 ### Architecture improvements
 - `calcActualProfit(card)` — new exported function for soldPrice-based profit

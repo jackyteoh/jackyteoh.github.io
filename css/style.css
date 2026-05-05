@@ -260,7 +260,7 @@ code { font-family:var(--font-mono); font-size:11px; background:var(--bg-seconda
 .quick-add-btn { float:right; gap:5px; background:var(--text-primary); border:0.5px solid var(--border-default); border-radius:var(--radius-md); padding:7px 13px; font-size:13px; font-family:var(--font); color:var(--bg-primary); cursor:pointer; text-decoration:none; white-space:nowrap; transition:background 0.12s, opacity 0.12s;}
 .quick-add-btn:hover { opacity:0.85; }
 .card-added-feedback { font-size:12px; color:var(--text-success); background:var(--bg-success); border:0.5px solid var(--border-success); border-radius:var(--radius-sm); padding:6px 10px; margin-bottom:8px; }
-.jp-label { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-secondary); margin-bottom:0.75rem; cursor:pointer; user-select:none; }
+.jp-label { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-secondary); cursor:pointer; user-select:none; }
 .jp-label input[type=checkbox] { width:14px; height:14px; }
 
 /* ── Responsive ──────────────────────────────────────────────── */
@@ -598,3 +598,223 @@ kbd {
 
 /* ── v9: bulk condition select ───────────────────────────── */
 .bulk-toolbar select { max-width: 130px; height: 28px; padding: 3px 8px; }
+
+/* ── v11: JP badge ─────────────────────────────────────────── */
+.jp-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: #e8453c;
+  border-radius: 3px;
+  padding: 1px 4px;
+  vertical-align: middle;
+  margin-right: 4px;
+  line-height: 1.4;
+}
+
+/* ── v11: search options row (JP + Promo toggles) ─────────── */
+.search-options-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 0.65rem;
+}
+.promo-label {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-secondary);
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.promo-label input[type=checkbox] { width: 14px; height: 14px; }
+.search-hint-inline {
+  font-size: 11px; color: var(--text-tertiary); line-height: 1.4;
+}
+.search-hint-inline a { color: var(--text-info); }
+
+/* ── v12: skeleton loader cards ──────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+.result-card.skeleton {
+  pointer-events: none;
+  gap: 10px;
+}
+.skeleton-img {
+  width: 40px; height: 56px; border-radius: 4px; flex-shrink: 0;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-secondary) 50%, var(--bg-tertiary) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.2s infinite;
+}
+.skeleton-info { flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.skeleton-line {
+  height: 11px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-secondary) 50%, var(--bg-tertiary) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.2s infinite;
+}
+.skeleton-line.wide   { width: 80%; }
+.skeleton-line.medium { width: 55%; }
+.skeleton-line.narrow { width: 35%; }
+
+/* ── v12: result count header ─────────────────────────────────── */
+.results-count {
+  font-size: 11px; color: var(--text-tertiary);
+  padding: 2px 0 6px 0; margin-bottom: 2px;
+}
+
+/* ── v12: proxy status note in search modal ──────────────────── */
+.search-hint-inline.proxy-active   { color: var(--text-success); }
+.search-hint-inline.proxy-inactive { color: var(--text-warning); }
+.search-hint-inline.proxy-inactive a { color: var(--text-info); }
+
+/* ── v12: stale price dot (amber = >24h old) ─────────────────── */
+.cache-dot.fresh { color: var(--text-success); }
+.cache-dot.stale { color: #d97706; }  /* amber */
+
+/* ── v12: price source badge (#3) ────────────────────────────── */
+.price-source-badge {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+  letter-spacing: 0.02em;
+}
+.popover-source {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-align: right;
+  margin-top: -4px;
+  margin-bottom: 0.5rem;
+}
+
+/* ── v12: JP set browser (#2) ────────────────────────────────── */
+.jp-set-browser {
+  margin: 6px 0 8px;
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+.set-browser-header {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 6px 10px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.set-browser-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+.set-browser-loading {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 8px 10px;
+  font-style: italic;
+}
+.set-browser-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 8px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.set-browser-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  white-space: nowrap;
+}
+.set-browser-item:hover    { background: var(--bg-tertiary); color: var(--text-primary); border-color: var(--border-default); }
+.set-browser-item.selected { background: var(--bg-info); color: var(--text-info); border-color: var(--border-info); }
+.set-browser-name { flex: 1; }
+.set-browser-date { font-size: 10px; color: var(--text-tertiary); }
+
+/* ── v13: Toast notifications (top-right) ────────────────────── */
+.toast {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 9999;
+  max-width: 320px;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-family: var(--font);
+  line-height: 1.4;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.14);
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+.toast.toast-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.toast.toast-ok  { background: var(--bg-success); color: var(--text-success); border: 0.5px solid var(--border-success); }
+.toast.toast-err { background: var(--bg-danger);  color: var(--text-danger);  border: 0.5px solid var(--border-danger);  }
+.toast.toast-info{ background: var(--bg-info);    color: var(--text-info);    border: 0.5px solid var(--border-info);    }
+
+/* ── v13: Row count display in filter bar ───────────────────────── */
+.row-count-display {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  padding: 0 2px;
+}
+
+/* ── v13: Scroll jump buttons ──────────────────────────────────── */
+.table-scroll-btns {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+.scroll-jump-btn {
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.scroll-jump-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); border-color: var(--border-default); }
+
+/* ── v13: Sticky summary bar ───────────────────────────────────── */
+.summary-bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  /* Give it a solid background + shadow so it lifts above table content */
+  background: var(--bg-tertiary);
+  padding-top: 4px;
+  padding-bottom: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* ── v13: Empty filter state ──────────────────────────────────── */
+.empty-filter-state {
+  text-align: center;
+  padding: 2.5rem 1rem;
+  color: var(--text-tertiary);
+}
+.empty-filter-state p { font-size: 14px; margin-bottom: 0.75rem; }

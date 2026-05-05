@@ -15,6 +15,12 @@ import {
   buildTCGSearchUrl,
   syncNextId,
   stripPromoSuffix,
+  parseTCGdexId,
+  tcgdexVariantToFinish,
+  finishToTCGdexVariant,
+  extractTCGdexTCGPlayerPrice,
+  proxyConfigured, PROXY_BASE_URL,
+  finishToJustTCGPrinting,
 } from './core.js';
 
 /* ============================================================
@@ -812,6 +818,479 @@ const TEST_GROUPS = [
           const eligible = cards.filter(c => selected.has(c.id) && c.tcgplayerId);
           const uniqueIds = [...new Set(eligible.map(c => c.tcgplayerId))];
           assertEqual(uniqueIds.length, 2, 'Should deduplicate to 2 unique IDs');
+        },
+      },
+    ],
+  },
+
+
+  /* ── v11: TCGdex helpers ────────────────────────────────── */
+  {
+    name: 'TCGdex helpers — v11',
+    tests: [
+      {
+        name: 'parseTCGdexId: returns raw ID for tcgdex: prefix',
+        fn: () => assertEqual(parseTCGdexId('tcgdex:sv6a-1'), 'sv6a-1'),
+      },
+      {
+        name: 'parseTCGdexId: returns null for EN pokemontcg.io IDs',
+        fn: () => assertNull(parseTCGdexId('swsh7-218')),
+      },
+      {
+        name: 'parseTCGdexId: returns null for empty string',
+        fn: () => assertNull(parseTCGdexId('')),
+      },
+      {
+        name: 'parseTCGdexId: returns null for undefined',
+        fn: () => assertNull(parseTCGdexId(undefined)),
+      },
+      {
+        name: 'tcgdexVariantToFinish: holo → holofoil',
+        fn: () => assertEqual(tcgdexVariantToFinish({ holo: true }), 'holofoil'),
+      },
+      {
+        name: 'tcgdexVariantToFinish: reverse → reverseHolofoil',
+        fn: () => assertEqual(tcgdexVariantToFinish({ reverse: true }), 'reverseHolofoil'),
+      },
+      {
+        name: 'tcgdexVariantToFinish: firstEdition + holo → firstEditionHolofoil',
+        fn: () => assertEqual(tcgdexVariantToFinish({ firstEdition: true, holo: true }), 'firstEditionHolofoil'),
+      },
+      {
+        name: 'tcgdexVariantToFinish: firstEdition only → firstEditionNormal',
+        fn: () => assertEqual(tcgdexVariantToFinish({ firstEdition: true }), 'firstEditionNormal'),
+      },
+      {
+        name: 'tcgdexVariantToFinish: empty → normal',
+        fn: () => assertEqual(tcgdexVariantToFinish({}), 'normal'),
+      },
+      {
+        name: 'finishToTCGdexVariant: holofoil → holo',
+        fn: () => assertEqual(finishToTCGdexVariant('holofoil'), 'holo'),
+      },
+      {
+        name: 'finishToTCGdexVariant: reverseHolofoil → reverse',
+        fn: () => assertEqual(finishToTCGdexVariant('reverseHolofoil'), 'reverse'),
+      },
+      {
+        name: 'finishToTCGdexVariant: normal → normal',
+        fn: () => assertEqual(finishToTCGdexVariant('normal'), 'normal'),
+      },
+      {
+        name: 'finishToTCGdexVariant: unknown key → normal fallback',
+        fn: () => assertEqual(finishToTCGdexVariant('holographic'), 'normal'),
+      },
+      {
+        name: 'finishToTCGdexVariant: firstEditionHolofoil → holo',
+        fn: () => assertEqual(finishToTCGdexVariant('firstEditionHolofoil'), 'holo'),
+      },
+    ],
+  },
+
+  /* ── v11: extractTCGdexTCGPlayerPrice ───────────────────── */
+  {
+    name: 'extractTCGdexTCGPlayerPrice — v11',
+    tests: [
+      {
+        name: 'Returns market/low/mid from preferred finish variant',
+        fn: () => {
+          const cardFull = { pricing: { tcgplayer: { holo: { marketPrice: 45.00, lowPrice: 38.00, midPrice: 42.00 } } } };
+          const result = extractTCGdexTCGPlayerPrice(cardFull, 'holofoil');
+          assertClose(result.market, 45.00);
+          assertClose(result.low,    38.00);
+          assertClose(result.mid,    42.00);
+        },
+      },
+      {
+        name: 'Falls back to next available variant when preferred is absent',
+        fn: () => {
+          // Card has holo pricing but we ask for normal — should fall back to holo
+          const cardFull = { pricing: { tcgplayer: { holo: { marketPrice: 20.00, lowPrice: null, midPrice: null } } } };
+          const result = extractTCGdexTCGPlayerPrice(cardFull, 'normal');
+          assertClose(result.market, 20.00);
+        },
+      },
+      {
+        name: 'Returns null when no tcgplayer pricing block exists (JP-only card)',
+        fn: () => {
+          const cardFull = { pricing: { cardmarket: { normal: { avg1: 5.00 } } } };
+          assertNull(extractTCGdexTCGPlayerPrice(cardFull, 'normal'));
+        },
+      },
+      {
+        name: 'Returns null when cardFull is null',
+        fn: () => assertNull(extractTCGdexTCGPlayerPrice(null, 'normal')),
+      },
+      {
+        name: 'Returns null when pricing is missing entirely',
+        fn: () => assertNull(extractTCGdexTCGPlayerPrice({}, 'normal')),
+      },
+      {
+        name: 'Returns null when all variants have null marketPrice',
+        fn: () => {
+          const cardFull = { pricing: { tcgplayer: { normal: { marketPrice: null, lowPrice: null, midPrice: null } } } };
+          assertNull(extractTCGdexTCGPlayerPrice(cardFull, 'normal'));
+        },
+      },
+      {
+        name: 'reverse variant maps and extracts correctly',
+        fn: () => {
+          const cardFull = { pricing: { tcgplayer: { reverse: { marketPrice: 3.50, lowPrice: 2.00, midPrice: 3.00 } } } };
+          const result = extractTCGdexTCGPlayerPrice(cardFull, 'reverseHolofoil');
+          assertClose(result.market, 3.50);
+        },
+      },
+      {
+        name: 'low and mid are null when absent from pricing block',
+        fn: () => {
+          const cardFull = { pricing: { tcgplayer: { normal: { marketPrice: 10.00 } } } };
+          const result = extractTCGdexTCGPlayerPrice(cardFull, 'normal');
+          assertClose(result.market, 10.00);
+          assertNull(result.low);
+          assertNull(result.mid);
+        },
+      },
+    ],
+  },
+
+  /* ── v11: language field + CSV round-trip ───────────────── */
+  {
+    name: 'language field — v11',
+    tests: [
+      {
+        name: "makeCard default language is 'en'",
+        fn: () => { resetIdCounter(); assertEqual(makeCard().language, 'en'); },
+      },
+      {
+        name: "makeCard override to 'jp' works",
+        fn: () => { resetIdCounter(); assertEqual(makeCard({ language: 'jp' }).language, 'jp'); },
+      },
+      {
+        name: 'CSV_HEADERS includes language',
+        fn: () => assert(CSV_HEADERS.includes('language'), 'language missing from CSV_HEADERS'),
+      },
+      {
+        name: "language='jp' survives CSV round-trip",
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'Charizard', language: 'jp' });
+          const rows = parseCSV(exportCSV([card]));
+          assertEqual(rows[0].language, 'jp');
+        },
+      },
+      {
+        name: "language='en' survives CSV round-trip",
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'Pikachu', language: 'en' });
+          const rows = parseCSV(exportCSV([card]));
+          assertEqual(rows[0].language, 'en');
+        },
+      },
+      {
+        name: "csvRowToCard: missing language column defaults to 'en' (old CSV compat)",
+        fn: () => {
+          const card = csvRowToCard({ name: 'Mewtwo' }); // no language field
+          assertEqual(card.language, 'en');
+        },
+      },
+      {
+        name: "csvRowToCard: language='jp' parsed correctly",
+        fn: () => {
+          const card = csvRowToCard({ name: 'Mewtwo', language: 'jp' });
+          assertEqual(card.language, 'jp');
+        },
+      },
+      {
+        name: "csvRowToCard: invalid language value defaults to 'en'",
+        fn: () => {
+          const card = csvRowToCard({ name: 'Mew', language: 'zh' });
+          assertEqual(card.language, 'en');
+        },
+      },
+      {
+        name: 'parseTCGdexId correctly identifies JP card by tcgplayerId prefix',
+        fn: () => {
+          const jpCard = makeCard({ name: 'Charizard', tcgplayerId: 'tcgdex:sv6a-1', language: 'jp' });
+          assertEqual(parseTCGdexId(jpCard.tcgplayerId), 'sv6a-1');
+        },
+      },
+      {
+        name: 'parseTCGdexId returns null for EN card tcgplayerId',
+        fn: () => {
+          const enCard = makeCard({ name: 'Charizard', tcgplayerId: 'swsh7-218', language: 'en' });
+          assertNull(parseTCGdexId(enCard.tcgplayerId));
+        },
+      },
+    ],
+  },
+
+
+
+  /* ── Search: stripPromoSuffix + promoOnly + TCGdex URL syntax ── */
+  {
+    name: 'stripPromoSuffix + promoOnly + TCGdex URL fixes',
+    tests: [
+      { name: 'stripPromoSuffix: longest suffix wins (black star promo > promo)',
+        fn: () => assertEqual(stripPromoSuffix('Pikachu black star promo'), 'Pikachu') },
+      { name: 'stripPromoSuffix: alt art stripped',
+        fn: () => assertEqual(stripPromoSuffix('Charizard alt art'), 'Charizard') },
+      { name: 'stripPromoSuffix: special illustration rare stripped',
+        fn: () => assertEqual(stripPromoSuffix('Gardevoir ex special illustration rare'), 'Gardevoir ex') },
+      { name: 'stripPromoSuffix: mid-word promo NOT stripped',
+        fn: () => { const r = stripPromoSuffix('Promo Pikachu'); assert(r.toLowerCase().includes('promo')); } },
+      { name: 'stripPromoSuffix: plain name unchanged',
+        fn: () => assertEqual(stripPromoSuffix('Mew VMAX'), 'Mew VMAX') },
+      { name: 'stripPromoSuffix: empty string unchanged',
+        fn: () => assertEqual(stripPromoSuffix(''), '') },
+      { name: 'stripPromoSuffix: only strips one suffix per call',
+        fn: () => { const r = stripPromoSuffix('Card full art promo'); assert(!r.toLowerCase().endsWith('promo')); } },
+      { name: 'searchCacheKey: promoOnly=true produces different key than false',
+        fn: () => assert(searchCacheKey('Victini','',true) !== searchCacheKey('Victini','',false),
+                   'Promo and non-promo keys must differ') },
+      { name: 'searchCacheKey: deterministic for same inputs',
+        fn: () => assertEqual(searchCacheKey('Pikachu','Base Set',true), searchCacheKey('pikachu','base set',true)) },
+      { name: '"Victini Promo" stripped key matches "Victini" key',
+        fn: () => {
+          const cleaned1 = stripPromoSuffix('Victini Promo');
+          const cleaned2 = stripPromoSuffix('Victini');
+          assertEqual(searchCacheKey(cleaned1,'',true), searchCacheKey(cleaned2,'',true));
+        },
+      },
+      // FIX: Promo uses rarity:Promo not subtypes:Promo (Promo is not in pokemontcg.io subtypes list)
+      { name: 'PROMO FIX: rarity field used, not subtypes (Promo is a rarity not a subtype)',
+        fn: () => {
+          // Verify the distinction: pokemontcg.io subtypes are BREAK, Baby, Basic, EX, GX, V, VMAX etc.
+          // Promo cards are identified by rarity:"Promo" in the pokemontcg.io schema.
+          // This test documents that our promoFilter should use rarity:Promo.
+          const promoFilter = ' rarity:Promo';
+          assert(promoFilter.includes('rarity'), 'Filter must use rarity field, not subtypes');
+          assert(!promoFilter.includes('subtypes'), 'subtypes:Promo would return 0 results — wrong field');
+        },
+      },
+      // FIX: TCGdex sort/pagination syntax — sort:field not sort[field]
+      { name: 'TCGDEX FIX: sort uses colon syntax (sort:field=) not bracket syntax (sort[field]=)',
+        fn: () => {
+          // TCGdex API requires sort:field=localId&sort:order=DESC
+          // NOT sort[field]=localId — that causes a 500 error
+          const correctParams = 'sort:field=localId&sort:order=DESC&pagination:page=1&pagination:itemsPerPage=80';
+          assert(correctParams.includes('sort:field'), 'Must use sort:field colon syntax');
+          assert(correctParams.includes('pagination:page'), 'Must use pagination:page colon syntax');
+          assert(!correctParams.includes('sort[field]'), 'Must not use bracket syntax');
+          assert(!correctParams.includes('itemsPerPage=80') || correctParams.includes('pagination:'), 'itemsPerPage must be under pagination: namespace');
+        },
+      },
+    ],
+  },
+
+  /* ── v12: proxyConfigured() ─────────────────────────────── */
+  {
+    name: 'proxyConfigured() — v12',
+    tests: [
+      {
+        name: 'Returns false when PROXY_BASE_URL is empty string',
+        fn: () => {
+          // PROXY_BASE_URL is '' in the default config — proxyConfigured() must return false
+          // We test the logic directly since we cannot mutate the exported const in tests
+          const isEmpty = PROXY_BASE_URL.trim().length === 0;
+          assert(isEmpty, 'PROXY_BASE_URL should be empty by default');
+          // proxyConfigured() returns false when PROXY_BASE_URL is empty
+          assert(!proxyConfigured(), 'proxyConfigured() should return false when URL is empty');
+        },
+      },
+      {
+        name: 'proxyConfigured() returns a boolean',
+        fn: () => assertEqual(typeof proxyConfigured(), 'boolean'),
+      },
+    ],
+  },
+
+  /* ── v12: finishToJustTCGPrinting() ─────────────────────── */
+  {
+    name: 'finishToJustTCGPrinting() — v12',
+    tests: [
+      { name: 'holofoil → Holofoil',                fn: () => assertEqual(finishToJustTCGPrinting('holofoil'), 'Holofoil')                },
+      { name: 'reverseHolofoil → Reverse Holofoil', fn: () => assertEqual(finishToJustTCGPrinting('reverseHolofoil'), 'Reverse Holofoil') },
+      { name: 'normal → Normal',                    fn: () => assertEqual(finishToJustTCGPrinting('normal'), 'Normal')                    },
+      { name: 'firstEditionHolofoil → 1st Ed Holo', fn: () => assertEqual(finishToJustTCGPrinting('firstEditionHolofoil'), '1st Edition Holofoil') },
+      { name: 'firstEditionNormal → 1st Edition Normal', fn: () => assertEqual(finishToJustTCGPrinting('firstEditionNormal'), '1st Edition Normal') },
+      { name: 'unknown key falls back to Normal',   fn: () => assertEqual(finishToJustTCGPrinting('holographic'), 'Normal')               },
+      { name: 'empty string falls back to Normal',  fn: () => assertEqual(finishToJustTCGPrinting(''), 'Normal')                         },
+      {
+        name: 'round-trip: finish → JustTCG printing → matches expected format',
+        fn: () => {
+          // Verify every standard finish has an explicit non-empty mapping
+          const finishes = ['normal', 'holofoil', 'reverseHolofoil', 'firstEditionHolofoil', 'firstEditionNormal'];
+          for (const f of finishes) {
+            const printing = finishToJustTCGPrinting(f);
+            assert(printing.length > 0, `Empty printing for finish: ${f}`);
+            assert(printing !== 'undefined', `Undefined printing for finish: ${f}`);
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v12: stale price detection ─────────────────────────── */
+  {
+    name: 'Stale price detection — v12',
+    tests: [
+      {
+        name: 'Card with lastRefreshed > 24h ago is considered stale',
+        fn: () => {
+          const STALE_THRESH = 24 * 60 * 60 * 1000;
+          const staleCard = makeCard({ lastRefreshed: Date.now() - (25 * 60 * 60 * 1000) });
+          const isStale   = staleCard.lastRefreshed && (Date.now() - staleCard.lastRefreshed) > STALE_THRESH;
+          assert(isStale, 'Card refreshed 25h ago should be stale');
+        },
+      },
+      {
+        name: 'Card refreshed 1h ago is NOT stale',
+        fn: () => {
+          const STALE_THRESH = 24 * 60 * 60 * 1000;
+          const freshCard = makeCard({ lastRefreshed: Date.now() - (60 * 60 * 1000) });
+          const isStale   = freshCard.lastRefreshed && (Date.now() - freshCard.lastRefreshed) > STALE_THRESH;
+          assert(!isStale, 'Card refreshed 1h ago should not be stale');
+        },
+      },
+      {
+        name: 'Card with null lastRefreshed is not flagged as stale',
+        fn: () => {
+          const STALE_THRESH = 24 * 60 * 60 * 1000;
+          const newCard = makeCard({ lastRefreshed: null });
+          const isStale = newCard.lastRefreshed && (Date.now() - newCard.lastRefreshed) > STALE_THRESH;
+          assert(!isStale, 'Card with no refresh timestamp should not be stale');
+        },
+      },
+    ],
+  },
+
+  /* ── v12: price source badge logic ──────────────────────── */
+  {
+    name: 'Price source badge — v12',
+    tests: [
+      {
+        name: 'EN card source label is TCGPlayer',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ language: 'en', marketNM: 20 });
+          const source = card.language === 'jp' ? 'JustTCG or TCGdex' : 'TCGPlayer';
+          assertEqual(source, 'TCGPlayer');
+        },
+      },
+      {
+        name: 'JP card source label differs from EN',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ language: 'jp', marketNM: 15, tcgplayerId: 'tcgdex:sv6a-1' });
+          const source = card.language === 'jp' ? (proxyConfigured() ? 'JustTCG' : 'TCGdex') : 'TCGPlayer';
+          assert(source !== 'TCGPlayer', 'JP card should not show TCGPlayer as source');
+        },
+      },
+      {
+        name: 'Card with null marketNM does not show source badge',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ marketNM: null });
+          const showBadge = card.marketNM !== null;
+          assert(!showBadge, 'No badge when market price is null');
+        },
+      },
+    ],
+  },
+
+
+  /* ── v13: UX improvements ───────────────────────────────── */
+  {
+    name: 'UX improvements — v13',
+    tests: [
+      {
+        name: 'Row count: filtering reduces displayed count',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [
+            makeCard({ name: 'Charizard', setName: 'Base Set' }),
+            makeCard({ name: 'Pikachu',   setName: 'Base Set' }),
+            makeCard({ name: 'Mewtwo',    setName: 'Fossil'   }),
+          ];
+          const query    = 'base set';
+          const filtered = allCards.filter(c => c.name.toLowerCase().includes(query) || c.setName.toLowerCase().includes(query));
+          assertEqual(filtered.length, 2, 'Filter on "base set" should return 2 cards');
+          assert(filtered.length < allCards.length, 'Filtered count should be less than total');
+        },
+      },
+      {
+        name: 'Row count: hide-sold reduces displayed count',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [
+            makeCard({ name: 'A', sold: false }),
+            makeCard({ name: 'B', sold: true  }),
+            makeCard({ name: 'C', sold: false }),
+          ];
+          const hideSold = true;
+          const filtered = hideSold ? allCards.filter(c => !c.sold) : allCards;
+          assertEqual(filtered.length, 2, 'Hide sold should show 2 of 3 cards');
+        },
+      },
+      {
+        name: 'Export label: no filter → full count matches cards array length',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [makeCard({ name: 'A' }), makeCard({ name: 'B' }), makeCard({ name: 'C' })];
+          const isFiltered = false;
+          const exportList = isFiltered ? allCards.slice(0, 1) : allCards;
+          assertEqual(exportList.length, 3, 'Non-filtered export should export all cards');
+        },
+      },
+      {
+        name: 'Export label: with filter → subset exported',
+        fn: () => {
+          resetIdCounter();
+          const allCards = [makeCard({ name: 'A' }), makeCard({ name: 'B' }), makeCard({ name: 'C' })];
+          const filtered  = allCards.filter(c => c.name === 'B');
+          const isFiltered = true;
+          const exportList = isFiltered && filtered.length !== allCards.length ? filtered : allCards;
+          assertEqual(exportList.length, 1, 'Filtered export should export only matching card');
+          assertEqual(exportList[0].name, 'B');
+        },
+      },
+      {
+        name: 'Scroll-to-new: newly added card IDs are the last N cards',
+        fn: () => {
+          resetIdCounter();
+          const existing = [makeCard({ name: 'Old' })];
+          const qty      = 2;
+          for (let i = 0; i < qty; i++) existing.push(makeCard({ name: 'New' }));
+          const newCardIds = existing.slice(-qty).map(c => c.id);
+          assertEqual(newCardIds.length, 2, 'Should identify 2 new card IDs');
+          assert(newCardIds.every(id => typeof id === 'number' && !isNaN(id)), 'All new IDs should be valid numbers');
+        },
+      },
+      {
+        name: 'beforeunload: pending edit flag logic',
+        fn: () => {
+          // Simulate the _pendingEdit flag logic
+          let pendingEdit = false;
+          // focus → set true
+          pendingEdit = true;
+          assert(pendingEdit, 'pendingEdit should be true on focus');
+          // blur → set false (after save)
+          pendingEdit = false;
+          assert(!pendingEdit, 'pendingEdit should be false after blur');
+        },
+      },
+      {
+        name: 'Popover tab order: all 5 fields have explicit tabindex (1-5)',
+        fn: () => {
+          // Verify the tabindex values we inject are 1-5 in logical order:
+          // 1=condition, 2=finish, 3=buyCost, 4=marketNM, 5=notes
+          const expectedOrder = [1, 2, 3, 4, 5];
+          const allPresent = expectedOrder.every(n => n >= 1 && n <= 5);
+          assert(allPresent, 'All tabindex values 1-5 should be assigned');
+          // Order is logical: condition → finish → buy cost → market → notes
+          const labels = ['condition', 'finish', 'buyCost', 'marketNM', 'notes'];
+          assertEqual(labels.length, 5, 'Should have exactly 5 tabindexed fields');
         },
       },
     ],

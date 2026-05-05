@@ -79,6 +79,7 @@
         <input type="text" id="filter-input" placeholder="Filter by name or set…">
       </div>
       <button class="btn btn-sm" id="filter-clear">Clear</button>
+      <span id="row-count" class="row-count-display" style="display:none"></span>
       <label class="skip-sold-label" title="Hide sold cards from the table"><input type="checkbox" id="hide-sold-cb"> Hide sold</label>
     </div>
 
@@ -104,6 +105,10 @@
       <div id="col-panel" class="col-panel" style="display:none"></div>
       <div id="popover-backdrop" class="popover-backdrop" style="display:none"></div>
       <div id="card-popover" class="card-popover" style="display:none"></div>
+      <div class="table-scroll-btns">
+        <button class="scroll-jump-btn" id="scroll-top-btn" title="Jump to top">↑ Top</button>
+        <button class="scroll-jump-btn" id="scroll-bottom-btn" title="Jump to bottom">↓ Bottom</button>
+      </div>
       <div class="table-wrap">
         <table id="card-table">
           <thead><tr></tr></thead>
@@ -139,17 +144,26 @@
         <button class="tab-btn" id="tabBtn-url">Paste TCGPlayer URL</button>
       </div>
       <div id="tab-name">
-        <p class="search-hint">Exact match first, wildcard fallback · promo suffixes auto-stripped · cached 6 h</p>
+        <p class="search-hint">EN: exact→wildcard · promo suffixes stripped · JP: TCGdex API · cached 6 h</p>
         <div id="card-added" class="card-added-feedback" style="display:none"></div>
         <div class="search-input-wrap">
           <input type="text" id="search-input" placeholder="Card name, e.g. Charizard, Alakazam ex…">
           <input type="text" id="set-filter-input" placeholder="Set name (optional)" style="max-width:155px">
           <button class="btn btn-primary" id="search-btn">Search</button>
         </div>
-        <label class="jp-label">
-          <input type="checkbox" id="jp-toggle">
-          Japanese cards (wildcard name search)
-        </label>
+        <div class="search-options-row">
+          <label class="jp-label" title="Search Japanese cards. Configure proxy for full JustTCG coverage, or uses TCGdex fallback.">
+            <input type="checkbox" id="jp-toggle">
+            Japanese cards
+          </label>
+          <label class="promo-label" title="Filter English results to Promo cards only. Mutually exclusive with JP mode.">
+            <input type="checkbox" id="promo-toggle">
+            Promo only
+          </label>
+          <span class="search-hint-inline" id="search-mode-note">JP: TCGdex · EN: pokemontcg.io · prices via TCGPlayer USD</span>
+        </div>
+        <!-- JP set browser — shown when JP toggle is enabled -->
+        <div id="jp-set-browser" class="jp-set-browser" style="display:none"></div>
         <div id="search-results-area"></div>
       </div>
       <div id="tab-url" style="display:none">
@@ -189,7 +203,7 @@
 
         <div class="howto-section">
           <div class="howto-section-title">Adding cards</div>
-          <p>Click <strong>+ Add card via search</strong> at the bottom of the table. Type a card name — the search tries an exact match first, then falls back to a wildcard if nothing is found. Optionally enter a set name to narrow results. Toggle <strong>Japanese cards</strong> to find Japanese-set printings. Click a result to select a finish, then press <strong>Add to list</strong> or <strong>Quick add</strong> — the modal stays open so you can keep adding. You can also paste a TCGPlayer product URL in the second tab.</p>
+          <p>Click <strong>+ Add card via search</strong> at the bottom of the table. Type a card name — the search tries an exact match first, then falls back to a wildcard if nothing is found. Optionally enter a set name to narrow results. Toggle <strong>Japanese cards</strong> to search via TCGdex (real Japanese set data, TCGPlayer USD prices). Toggle <strong>Promo only</strong> to filter English results to promo cards. Click a result to select a finish, then press <strong>Add to list</strong> or <strong>Quick add</strong> — the modal stays open so you can keep adding. You can also paste a TCGPlayer product URL in the second tab.</p>
         </div>
 
         <div class="howto-section">
@@ -237,6 +251,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast notification (top-right) -->
+  <div id="toast-notification" class="toast" aria-live="polite"></div>
 
   <script type="module" src="js/tracker.js"></script>
 </body>

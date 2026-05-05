@@ -1,0 +1,11 @@
+name = "tcg-tracker-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Secrets are set via the Cloudflare dashboard or wrangler CLI:
+#   wrangler secret put JUSTTCG_API_KEY
+# Never put your actual key in this file.
+
+[vars]
+# Public config (non-secret) can go here
+TRACKER_VERSION = "12"
