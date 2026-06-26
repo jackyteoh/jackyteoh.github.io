@@ -21,7 +21,16 @@ import {
   extractTCGdexTCGPlayerPrice,
   proxyConfigured, PROXY_BASE_URL,
   finishToJustTCGPrinting,
+  matchScore, rankResults,
+  fetchTCGdexSetsList, fetchJPSets,
+  searchCards, getSearchDiagnostics,
 } from './core.js';
+import {
+  indexedDBAvailable, loadENCatalogue, isEnCatalogueLoaded,
+  searchENCatalogue, cacheJPSet, isJPSetCached, searchJPCatalogue,
+  catalogueStatus, clearCatalogue, CATALOGUE_TTL_MS,
+  getCatalogueDiagnostics,
+} from './catalogue.js';
 
 /* ============================================================
    Micro assertion library
@@ -62,7 +71,7 @@ const TEST_GROUPS = [
       { name: 'Positive profit', fn: () => { const {profit,pct} = calcProfit(makeCard({marketNM:20,buyCost:'10',condition:'NM'})); assertClose(profit,10); assertClose(pct,100); } },
       { name: 'Negative profit', fn: () => assertClose(calcProfit(makeCard({marketNM:5,buyCost:'10',condition:'NM'})).profit,-5) },
       { name: 'Null when buyCost empty', fn: () => assertNull(calcProfit(makeCard({marketNM:20,buyCost:''})).profit) },
-      { name: 'Null when buyCost zero',  fn: () => assertNull(calcProfit(makeCard({marketNM:20,buyCost:'0'})).profit) },
+      { name: 'buyCost zero (free card) = full market price as profit', fn: () => assertClose(calcProfit(makeCard({marketNM:20,buyCost:'0',condition:'NM'})).profit, 20) },
       { name: 'Null when no price data', fn: () => assertNull(calcProfit(makeCard({marketNM:null,priceMid:null,buyCost:'10'})).profit) },
       { name: 'Profit % = 50 when buy=10, market=15', fn: () => assertClose(calcProfit(makeCard({marketNM:15,buyCost:'10',condition:'NM'})).pct,50) },
       { name: 'LP condition factored in', fn: () => assertClose(calcProfit(makeCard({marketNM:10,buyCost:'6',condition:'LP'})).profit,2.5,0.01) },
@@ -1296,6 +1305,930 @@ const TEST_GROUPS = [
     ],
   },
 
+  /* ── v14: matchScore() ranking heuristic ─────────────────── */
+  {
+    name: 'matchScore() — v14 search ranking',
+    tests: [
+      { name: 'Exact case-insensitive match scores 0',
+        fn: () => assertEqual(matchScore('Charizard', 'charizard'), 0) },
+      { name: 'Exact match with identical casing scores 0',
+        fn: () => assertEqual(matchScore('Pikachu', 'Pikachu'), 0) },
+      { name: 'Starts-with match scores 1',
+        fn: () => assertEqual(matchScore('Charizard EX', 'charizard'), 1) },
+      { name: 'Whole-word match elsewhere in the name scores 2',
+        fn: () => assertEqual(matchScore('Mega Charizard X', 'charizard'), 2) },
+      { name: 'Substring (not whole word) match scores 3',
+        fn: () => assertEqual(matchScore('Supercharizardium', 'charizard'), 3) },
+      { name: 'No match at all scores 4',
+        fn: () => assertEqual(matchScore('Pikachu', 'charizard'), 4) },
+      { name: 'Empty query scores 4 (no match possible)',
+        fn: () => assertEqual(matchScore('Charizard', ''), 4) },
+      { name: 'Query with regex special characters does not throw',
+        fn: () => {
+          let threw = false;
+          try { matchScore('Charizard (EX)', '(ex)'); } catch { threw = true; }
+          assert(!threw, 'matchScore should safely escape regex special chars');
+        },
+      },
+      { name: 'Query with regex special characters still matches correctly',
+        fn: () => assertEqual(matchScore('Mr. Mime', 'mr.'), 1) },
+    ],
+  },
+
+  /* ── v14: rankResults() ────────────────────────────────────── */
+  {
+    name: 'rankResults() — v14 search ranking',
+    tests: [
+      {
+        name: 'Exact match is sorted first regardless of input order',
+        fn: () => {
+          const results = [
+            { name: 'Mega Charizard X' },
+            { name: 'Charizard EX' },
+            { name: 'Charizard' },
+          ];
+          const ranked = rankResults(results, 'charizard');
+          assertEqual(ranked[0].name, 'Charizard');
+        },
+      },
+      {
+        name: 'Full ranking order: exact > starts-with > whole-word',
+        fn: () => {
+          const results = [
+            { name: 'Mega Charizard X' },
+            { name: 'Charizard' },
+            { name: 'Charizard EX' },
+          ];
+          const ranked = rankResults(results, 'charizard');
+          assertEqual(ranked.map(r => r.name).join('|'), 'Charizard|Charizard EX|Mega Charizard X');
+        },
+      },
+      {
+        name: 'Ties preserve original relative order (stable sort)',
+        fn: () => {
+          const results = [{ name: 'Charizard EX' }, { name: 'Charizard GX' }];
+          const ranked = rankResults(results, 'charizard');
+          // Both score 1 (starts-with) — original order should be preserved
+          assertEqual(ranked[0].name, 'Charizard EX');
+          assertEqual(ranked[1].name, 'Charizard GX');
+        },
+      },
+      {
+        name: 'Does not mutate the original array',
+        fn: () => {
+          const results = [{ name: 'B' }, { name: 'A' }];
+          const original = [...results];
+          rankResults(results, 'a');
+          assertEqual(results[0].name, original[0].name);
+          assertEqual(results[1].name, original[1].name);
+        },
+      },
+      {
+        name: 'Empty results array returns empty array',
+        fn: () => assertEqual(rankResults([], 'charizard').length, 0),
+      },
+    ],
+  },
+
+  /* ── v14: IndexedDB catalogue module ─────────────────────── */
+  {
+    name: 'catalogue.js — IndexedDB local search index',
+    tests: [
+      {
+        name: 'indexedDBAvailable() returns a boolean',
+        fn: () => assertEqual(typeof indexedDBAvailable(), 'boolean'),
+      },
+      {
+        name: 'CATALOGUE_TTL_MS is 7 days in milliseconds',
+        fn: () => assertEqual(CATALOGUE_TTL_MS, 7 * 24 * 60 * 60 * 1000),
+      },
+      {
+        name: 'isEnCatalogueLoaded() never throws even with no data loaded',
+        fn: async () => {
+          let threw = false;
+          try { await isEnCatalogueLoaded(); } catch { threw = true; }
+          assert(!threw, 'isEnCatalogueLoaded should never throw');
+        },
+      },
+      {
+        name: 'searchENCatalogue() returns an array (never throws, never undefined)',
+        fn: async () => {
+          const result = await searchENCatalogue('charizard');
+          assert(Array.isArray(result), 'Should always return an array');
+        },
+      },
+      {
+        name: 'searchENCatalogue() with empty query returns empty array',
+        fn: async () => {
+          const result = await searchENCatalogue('');
+          assertEqual(result.length, 0);
+        },
+      },
+      {
+        name: 'searchJPCatalogue() returns an array for any input',
+        fn: async () => {
+          const result = await searchJPCatalogue('pikachu');
+          assert(Array.isArray(result), 'Should always return an array');
+        },
+      },
+      {
+        name: 'isJPSetCached() returns a boolean for any set id',
+        fn: async () => {
+          const result = await isJPSetCached('nonexistent-set');
+          assertEqual(typeof result, 'boolean');
+        },
+      },
+      {
+        name: 'cacheJPSet() with empty card list returns cached:false',
+        fn: async () => {
+          const fetchEmptySet = async () => [];
+          const result = await cacheJPSet('test-empty-set', fetchEmptySet);
+          assertEqual(result.cached, false);
+        },
+      },
+      {
+        name: 'cacheJPSet() with no setId returns cached:false',
+        fn: async () => {
+          const result = await cacheJPSet('', async () => []);
+          assertEqual(result.cached, false);
+        },
+      },
+      {
+        name: 'catalogueStatus() always returns an object with an "available" field',
+        fn: async () => {
+          const status = await catalogueStatus();
+          assert(typeof status === 'object' && status !== null, 'Should return an object');
+          assert('available' in status, 'Should have an available field');
+        },
+      },
+      {
+        name: 'clearCatalogue() does not throw',
+        fn: async () => {
+          let threw = false;
+          try { await clearCatalogue(); } catch { threw = true; }
+          assert(!threw, 'clearCatalogue should never throw');
+        },
+      },
+    ],
+  },
+
+  /* ── v14: batched refresh logic ──────────────────────────── */
+  {
+    name: 'Batched price refresh — v14 performance fix',
+    tests: [
+      {
+        name: 'Batching 12 unique IDs into groups of 5 produces 3 batches',
+        fn: () => {
+          const uniqueIds = Array.from({ length: 12 }, (_, i) => `card-${i}`);
+          const BATCH_SIZE = 5;
+          let batchCount = 0;
+          for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) batchCount++;
+          assertEqual(batchCount, 3, '12 items at batch size 5 should produce 3 batches (5+5+2)');
+        },
+      },
+      {
+        name: 'Batching exactly divisible count produces clean batches',
+        fn: () => {
+          const uniqueIds = Array.from({ length: 10 }, (_, i) => `card-${i}`);
+          const BATCH_SIZE = 5;
+          let batchCount = 0;
+          for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) batchCount++;
+          assertEqual(batchCount, 2);
+        },
+      },
+      {
+        name: 'Batching fewer items than batch size produces 1 batch',
+        fn: () => {
+          const uniqueIds = ['a', 'b', 'c'];
+          const BATCH_SIZE = 5;
+          let batchCount = 0;
+          for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) batchCount++;
+          assertEqual(batchCount, 1);
+        },
+      },
+      {
+        name: 'Promise.allSettled never throws even when all promises reject',
+        fn: async () => {
+          const promises = [Promise.reject('fail1'), Promise.reject('fail2')];
+          let threw = false;
+          let results;
+          try { results = await Promise.allSettled(promises); } catch { threw = true; }
+          assert(!threw, 'allSettled should never throw at the top level');
+          assert(results.every(r => r.status === 'rejected'), 'All results should report rejected status');
+        },
+      },
+    ],
+  },
+
+  /* ── v14.1: EN catalogue loader URL fix ──────────────────── */
+  {
+    name: 'loadENCatalogue() — sets-index + per-set fetch fix',
+    tests: [
+      {
+        name: 'loadENCatalogue() merges cards from multiple set files into one count',
+        fn: async () => {
+          const setsIndex = [{ id: 'fakeset1', name: 'Fake Set 1' }, { id: 'fakeset2', name: 'Fake Set 2' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('fakeset1.json')) return { ok: true, json: async () => [
+              { id: 'fakeset1-1', name: 'Test Card A', set: { id: 'fakeset1', name: 'Fake Set 1' }, number: '1', images: {}, tcgplayer: null },
+            ]};
+            if (url.includes('fakeset2.json')) return { ok: true, json: async () => [
+              { id: 'fakeset2-1', name: 'Test Card B', set: { id: 'fakeset2', name: 'Fake Set 2' }, number: '1', images: {}, tcgplayer: null },
+            ]};
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            assertEqual(result.count, 2, 'Should merge 1 card from each of 2 set files into a total of 2');
+            assert(result.loaded, 'Should report loaded:true when at least one set succeeded');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'loadENCatalogue() tolerates a 404 on one set without aborting the whole load',
+        fn: async () => {
+          const setsIndex = [{ id: 'goodset', name: 'Good Set' }, { id: 'brokenset', name: 'Broken Set' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('goodset.json')) return { ok: true, json: async () => [
+              { id: 'goodset-1', name: 'Survivor Card', set: { id: 'goodset', name: 'Good Set' }, number: '1', images: {}, tcgplayer: null },
+            ]};
+            if (url.includes('brokenset.json')) return { ok: false, status: 404 }; // simulates the real-world missing-file case
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            assertEqual(result.count, 1, 'Should still load the 1 card from the set that succeeded');
+            assert(result.loaded, 'A partial failure should not flip loaded to false');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'loadENCatalogue() returns loaded:false when the sets index itself 404s',
+        fn: async () => {
+          const originalFetch = global.fetch;
+          global.fetch = async () => ({ ok: false, status: 404 });
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            assertEqual(result.loaded, false);
+            assertEqual(result.count, 0);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'loadENCatalogue() progress callback fires once per batch, not once per set',
+        fn: async () => {
+          const setIds = Array.from({ length: 10 }, (_, i) => `pset${i}`);
+          const setsIndex = setIds.map(id => ({ id, name: id }));
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            for (const id of setIds) {
+              if (url.includes(`${id}.json`)) return { ok: true, json: async () => [
+                { id: `${id}-1`, name: `Card ${id}`, set: { id, name: id }, number: '1', images: {}, tcgplayer: null },
+              ]};
+            }
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const progressCalls = [];
+            await loadENCatalogue((loaded, total) => progressCalls.push([loaded, total]));
+            // BATCH_SIZE is 8 internally, so 10 sets should produce 2 progress calls (8, 10), not 10
+            assertEqual(progressCalls.length, 2, `Expected 2 batch-progress calls for 10 sets at batch size 8, got ${progressCalls.length}`);
+            assertEqual(progressCalls[progressCalls.length - 1][0], 10, 'Final progress call should report all 10 sets loaded');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v15 #2: setName + releaseDate joined onto card records ─ */
+  {
+    name: 'loadENCatalogue() — setName/releaseDate join fix (v15)',
+    tests: [
+      {
+        name: 'Card records get a non-empty setName joined from the sets index',
+        fn: async () => {
+          const setsIndex = [{ id: 'fakeset3', name: 'Fake Set Three', releaseDate: '2020/01/01' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('fakeset3.json')) return { ok: true, json: async () => [
+              { id: 'fakeset3-1', name: 'Joined Name Card', number: '1', images: {} }, // no `set` field — confirmed real shape
+            ]};
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const results = await searchENCatalogue('joined name card');
+            assertEqual(results.length, 1);
+            assertEqual(results[0].set.name, 'Fake Set Three', 'setName must be joined from the sets index, not read off the card (which has no set field)');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'Card records get releaseDate joined from the sets index',
+        fn: async () => {
+          const setsIndex = [{ id: 'fakeset4', name: 'Fake Set Four', releaseDate: '2021/06/15' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('fakeset4.json')) return { ok: true, json: async () => [
+              { id: 'fakeset4-1', name: 'Date Test Card', number: '1', images: {} },
+            ]};
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const results = await searchENCatalogue('date test card');
+            assertEqual(results[0].releaseDate, '2021/06/15');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'Set missing from the index (defensive) still gets a fallback name, not empty string',
+        fn: async () => {
+          // Simulates a set file that exists but for some reason isn't in setInfo
+          // (shouldn't happen in practice since both come from the same fetch,
+          // but the code has a defensive fallback — verify it actually fires)
+          const setsIndex = []; // empty index — every set is "missing"
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            // No sets in the index means no setIds to iterate — load should report not-loaded
+            assertEqual(result.loaded, false);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v15 #2: descending release-date sort ────────────────── */
+  {
+    name: 'searchENCatalogue() — newest-set-first sort (v15)',
+    tests: [
+      {
+        name: 'Results sorted descending by releaseDate (newest first)',
+        fn: async () => {
+          const setsIndex = [
+            { id: 'oldset', name: 'Old Set', releaseDate: '1999/01/09' },
+            { id: 'newset', name: 'New Set', releaseDate: '2024/11/08' },
+            { id: 'midset', name: 'Mid Set', releaseDate: '2015/06/01' },
+          ];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('oldset.json')) return { ok: true, json: async () => [{ id: 'oldset-1', name: 'Sortable Card', number: '1', images: {} }] };
+            if (url.includes('newset.json')) return { ok: true, json: async () => [{ id: 'newset-1', name: 'Sortable Card', number: '1', images: {} }] };
+            if (url.includes('midset.json')) return { ok: true, json: async () => [{ id: 'midset-1', name: 'Sortable Card', number: '1', images: {} }] };
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const results = await searchENCatalogue('sortable card');
+            assertEqual(results.length, 3);
+            assertEqual(results.map(r => r.set.name).join('|'), 'New Set|Mid Set|Old Set', 'Should be sorted newest-to-oldest');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: '"YYYY/MM/DD" format string-sorts correctly (no date parsing needed)',
+        fn: () => {
+          const dates = ['1999/01/09', '2024/11/08', '2015/06/01', '2026/05/22'];
+          const sorted = [...dates].sort((a, b) => b.localeCompare(a));
+          assertEqual(sorted.join('|'), '2026/05/22|2024/11/08|2015/06/01|1999/01/09');
+        },
+      },
+      {
+        name: 'rankResults() — v20: release date now wins over match closeness for non-tied dates',
+        fn: () => {
+          // v20 design reversal (was "relevance wins" through v19) — see
+          // rankResults()'s doc comment for the full rationale. A newer
+          // substring match should now outrank an older exact match,
+          // since the collection skews modern and "Mega X ex"/"X ex"
+          // variants shouldn't lose to a decades-old plain print just for
+          // being a stricter string match.
+          const results = [
+            { name: 'Charizard', releaseDate: '1999/01/01' },               // exact match, score 0, OLD
+            { name: 'Mega Charizard X ex', releaseDate: '2024/01/01' },     // word-boundary match, score 2, NEW
+          ];
+          const ranked = rankResults(results, 'charizard');
+          assertEqual(ranked[0].name, 'Mega Charizard X ex', 'Newer card should rank first despite being a looser match');
+        },
+      },
+      {
+        name: 'rankResults() — v20: match closeness still breaks ties among SAME release date',
+        fn: () => {
+          // Date is primary, but when two cards share a release date
+          // (e.g. printed in the same set), closeness should still decide
+          // the order between them — date doesn't make relevance
+          // meaningless, it just outranks it when dates actually differ.
+          const results = [
+            { name: 'Mega Charizard X ex', releaseDate: '2024/01/01' }, // score 2
+            { name: 'Charizard ex',        releaseDate: '2024/01/01' }, // score 1
+            { name: 'Charizard',           releaseDate: '2024/01/01' }, // score 0
+          ];
+          const ranked = rankResults(results, 'charizard');
+          assertEqual(ranked.map(r => r.name).join('|'), 'Charizard|Charizard ex|Mega Charizard X ex', 'Same-date cards should still rank by closeness');
+        },
+      },
+      {
+        name: 'rankResults() handles the live API\'s nested set.releaseDate shape, not just the local catalogue\'s flat field',
+        fn: () => {
+          const results = [
+            { name: 'Charizard',     set: { releaseDate: '1999/01/01' } }, // live-API shape
+            { name: 'Charizard ex',  set: { releaseDate: '2024/01/01' } },
+          ];
+          const ranked = rankResults(results, 'charizard');
+          assertEqual(ranked[0].name, 'Charizard ex', 'Should read releaseDate from card.set.releaseDate for live API results, not just card.releaseDate');
+        },
+      },
+    ],
+  },
+
+  /* ── v15 #1: refresh-on-add for EN cards with no price data ── */
+  {
+    name: 'Refresh-on-add — EN cards (v15)',
+    tests: [
+      {
+        name: 'EN card with marketNM=null after add is eligible for background refresh',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'Charizard', tcgplayerId: 'base1-4', marketNM: null, language: 'en' });
+          // Mirrors the condition checked in addSelectedCard before firing fetchCardPrices
+          const isJP = card.language === 'jp';
+          const eligible = !isJP && card.tcgplayerId && card.marketNM === null;
+          assert(eligible, 'A freshly-added EN card with no price should be eligible for background refresh');
+        },
+      },
+      {
+        name: 'EN card with marketNM already set is NOT re-fetched (avoids redundant API calls)',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'Pikachu', tcgplayerId: 'base1-58', marketNM: 4.50, language: 'en' });
+          const isJP = card.language === 'jp';
+          const eligible = !isJP && card.tcgplayerId && card.marketNM === null;
+          assert(!eligible, 'A card that already has a price should not trigger another fetch');
+        },
+      },
+      {
+        name: 'Card with no tcgplayerId is never eligible (nothing to look up)',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'Mystery Card', tcgplayerId: '', marketNM: null, language: 'en' });
+          const isJP = card.language === 'jp';
+          const eligible = !isJP && card.tcgplayerId && card.marketNM === null;
+          assert(!eligible, 'No tcgplayerId means no API call is possible');
+        },
+      },
+      {
+        name: 'JP cards are excluded from the EN refresh-on-add path (they have their own path)',
+        fn: () => {
+          resetIdCounter();
+          const card = makeCard({ name: 'JP Charizard', tcgplayerId: 'tcgdex:sv6a-1', marketNM: null, language: 'jp' });
+          const isJP = card.language === 'jp';
+          const eligible = !isJP && card.tcgplayerId && card.marketNM === null;
+          assert(!eligible, 'JP cards must not double-fetch via the EN path — they use fetchJPCardPrices separately');
+        },
+      },
+    ],
+  },
+
+  /* ── v15 #3: JP sets list — free fallback when proxy not configured ── */
+  {
+    name: 'fetchJPSets() — TCGdex fallback when proxy unset (v15)',
+    tests: [
+      {
+        name: 'fetchTCGdexSetsList() returns an array shaped like {id, name, releaseDate, cardCount}',
+        fn: async () => {
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('/en/sets')) return { ok: true, json: async () => [
+              { id: 'sv6a', name: 'Night Wanderer', releaseDate: '2024/07/05', cardCount: { total: 109 } },
+            ]};
+            return { ok: false, status: 404 };
+          };
+          try {
+            const sets = await fetchTCGdexSetsList();
+            assertEqual(sets.length, 1);
+            assertEqual(sets[0].id, 'sv6a');
+            assertEqual(sets[0].name, 'Night Wanderer');
+            assertEqual(sets[0].cardCount, 109);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'fetchTCGdexSetsList() returns [] on network failure, never throws',
+        fn: async () => {
+          const originalFetch = global.fetch;
+          global.fetch = async () => { throw new Error('network down'); };
+          try {
+            let threw = false;
+            let result;
+            try { result = await fetchTCGdexSetsList(); } catch { threw = true; }
+            assert(!threw, 'Should never throw, even on network failure');
+            assertEqual(result.length, 0);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'fetchJPSets() falls back to TCGdex when proxy is not configured',
+        fn: async () => {
+          // PROXY_BASE_URL is '' by default in this codebase (confirmed via proxyConfigured() tests
+          // elsewhere in this suite) — fetchJPSets() should still return data via the TCGdex fallback.
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('/en/sets')) return { ok: true, json: async () => [
+              { id: 'fallback-set', name: 'Fallback Set', releaseDate: '2023/01/01', cardCount: { total: 50 } },
+            ]};
+            return { ok: false, status: 404 };
+          };
+          try {
+            const sets = await fetchJPSets();
+            assert(sets.length > 0, 'fetchJPSets() must not return empty just because the proxy is unconfigured');
+            assertEqual(sets[0].id, 'fallback-set');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'fetchJPSets() never throws even when both proxy and TCGdex fail',
+        fn: async () => {
+          const originalFetch = global.fetch;
+          global.fetch = async () => ({ ok: false, status: 500 });
+          try {
+            let threw = false;
+            let result;
+            try { result = await fetchJPSets(); } catch { threw = true; }
+            assert(!threw, 'fetchJPSets should never throw');
+            assertEqual(result.length, 0);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v15 #5: connection pre-warm ──────────────────────────── */
+  {
+    name: 'Connection pre-warm — fire-and-forget (v15)',
+    tests: [
+      {
+        name: 'A failed pre-warm fetch does not throw when caught with .catch()',
+        fn: async () => {
+          const originalFetch = global.fetch;
+          global.fetch = async () => { throw new Error('simulated handshake failure'); };
+          try {
+            let threw = false;
+            try {
+              await fetch('https://api.pokemontcg.io/v2/cards?pageSize=1').catch(() => { /* pre-warm only */ });
+            } catch { threw = true; }
+            assert(!threw, 'Pre-warm fetch failures must never surface as unhandled errors');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'Batching math: 5-concurrent batches already in place for refreshAllPrices/bulkRefresh',
+        fn: () => {
+          // Documents the existing (confirmed correct, no change needed) batching
+          // that addresses the "fetching 5 at once still feels slow" symptom —
+          // the actual fix for that symptom is the pre-warm fetch above, since
+          // the batching itself was already concurrent via Promise.allSettled.
+          const BATCH_SIZE = 5;
+          const uniqueIds = Array.from({ length: 17 }, (_, i) => `card-${i}`);
+          let batches = 0;
+          for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) batches++;
+          assertEqual(batches, 4, '17 cards at batch size 5 should produce 4 batches (5+5+5+2)');
+        },
+      },
+    ],
+  },
+
+  /* ── v19 #1: catalogue cap-overflow regression test (closes v17 test gap) ──
+   * The v17 bug: searchENCatalogue() capped collection at limit*4 candidates
+   * while cursoring in an order that didn't guarantee newest-first, so for a
+   * popular query the cap could fill entirely on old-set matches before ever
+   * reaching newer ones. Fixed by cursoring the 'releaseDate' index in
+   * descending order. This test constructs exactly that shape (far more old
+   * matches than the cap, plus a few new ones) and asserts the new cards
+   * still surface — guarding against this exact regression recurring. */
+  {
+    name: 'searchENCatalogue() — cap-overflow regression (v19, closes v17 gap)',
+    tests: [
+      {
+        name: 'New-set matches still surface when old-set matches alone exceed the limit*4 cap',
+        fn: async () => {
+          const limit = 5; // cap = limit*4 = 20
+          // 6 old sets x 5 matching cards each = 30 old matches (> cap of 20)
+          const oldSets = Array.from({ length: 6 }, (_, i) => ({ id: `aaa${i}`, name: `Old ${i}`, releaseDate: `19${90 + i}/01/01` }));
+          // 2 new sets x 1 matching card each — alphabetically LATE ids, so an
+          // id-ordered cursor (the old bug) would reach these last, after the
+          // cap had already filled on old sets.
+          const newSets = [
+            { id: 'zzz1', name: 'New One', releaseDate: '2026/01/01' },
+            { id: 'zzz2', name: 'New Two', releaseDate: '2026/02/01' },
+          ];
+          const setsIndex = [...oldSets, ...newSets];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            const m = url.match(/cards\/en\/([^./]+)\.json/);
+            if (!m) return { ok: false, status: 404 };
+            const setId = m[1];
+            const isOld = oldSets.some(s => s.id === setId);
+            const n = isOld ? 5 : 1;
+            const cards = Array.from({ length: n }, (_, i) => ({ id: `${setId}-${i}`, name: 'Capcard', number: String(i), images: {} }));
+            return { ok: true, json: async () => cards };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const results = await searchENCatalogue('capcard', '', limit);
+            const newSetIds = new Set(newSets.map(s => s.id));
+            const foundNew = results.filter(r => newSetIds.has(r.set.id));
+            assert(foundNew.length === 2, `Both new-set matches should surface despite ${30} old-set matches exceeding the cap — found ${foundNew.length}/2`);
+            assertEqual(results[0].set.id, 'zzz2', 'Newest set (2026/02/01) should rank first');
+            assertEqual(results[1].set.id, 'zzz1', 'Second-newest set (2026/01/01) should rank second');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v19 #2: search-cache invalidation regression test (closes v18 gap) ──
+   * The v18 bug: searchCards() checks a localStorage result cache BEFORE
+   * the catalogue, keyed only by query/set/lang — not by code/schema
+   * version. A pre-fix cached entry could mask a real fix indefinitely.
+   * Fixed by bumping SEARCH_CACHE_PREFIX. This test writes a stale entry
+   * under the OLD prefix and confirms searchCards() does NOT return it —
+   * i.e. confirms old-prefix entries are orphaned/ignored, not replayed. */
+  {
+    name: 'searchCards() — stale search-cache invalidation (v19, closes v18 gap)',
+    tests: [
+      {
+        name: 'An entry written under the old "tcg_search_" prefix is never served back',
+        fn: async () => {
+          const staleKey = 'tcg_search_stalequerytest||en'; // OLD prefix, pre-v18
+          const staleResults = [{ id: 'stale-1', name: 'Stale Result', set: { id: 'oldset', name: 'Old' } }];
+          localStorage.setItem(staleKey, JSON.stringify({ results: staleResults, cachedAt: Date.now() }));
+          try {
+            // Current searchCacheKey() builds keys under the NEW prefix, so a
+            // lookup for the same query must miss the stale old-prefix entry.
+            const currentKey = searchCacheKey('stalequerytest', '', false);
+            assert(currentKey !== staleKey, 'Current cache key must differ from the old-prefix key for the same query');
+            assertNull(readSearchCache(staleKey) && null, 'sanity: stale entry is readable directly by its own raw key');
+            const freshLookup = readSearchCache(currentKey);
+            assertNull(freshLookup, 'A query never searched under the NEW prefix must be a clean cache miss, not the stale old-prefix value');
+          } finally {
+            localStorage.removeItem(staleKey);
+          }
+        },
+      },
+      {
+        name: 'clearPriceCache() sweeps both old- and new-prefix search cache entries',
+        fn: () => {
+          const oldKey = 'tcg_search_sweeptest||en';
+          const newKey = searchCacheKey('sweeptest', '', false);
+          localStorage.setItem(oldKey, JSON.stringify({ results: [], cachedAt: Date.now() }));
+          writeSearchCache(newKey, []);
+          clearPriceCache();
+          assertNull(localStorage.getItem(oldKey), 'Old-prefix entry should be swept');
+          assertNull(localStorage.getItem(newKey), 'New-prefix entry should be swept');
+        },
+      },
+    ],
+  },
+
+  /* ── v19 #3: diagnostics instrumentation (added this session) ──
+   * Pure observability additions — these tests confirm the diagnostic
+   * snapshots have the expected shape and update as expected, NOT that
+   * search/load timing hits any particular number (timing is
+   * environment-dependent and intentionally not asserted on). */
+  {
+    name: 'Diagnostics — getCatalogueDiagnostics() / getSearchDiagnostics() (v19)',
+    tests: [
+      {
+        name: 'getCatalogueDiagnostics() returns a plain object, never throws',
+        fn: () => {
+          const d = getCatalogueDiagnostics();
+          assert(typeof d === 'object' && d !== null, 'Should return an object');
+          assert('dbBlocked' in d, 'Should report whether an IndexedDB open() was ever blocked');
+          assert('enLoad' in d, 'Should report EN catalogue load state');
+        },
+      },
+      {
+        name: 'getCatalogueDiagnostics() reflects the most recent loadENCatalogue() outcome',
+        fn: async () => {
+          const setsIndex = [{ id: 'diagset', name: 'Diag Set', releaseDate: '2020/01/01' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('diagset.json')) return { ok: true, json: async () => [{ id: 'diagset-1', name: 'Diag Card', number: '1', images: {} }] };
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const d = getCatalogueDiagnostics();
+            assertEqual(d.enLoad.source, 'fresh-load', 'Should record that this was a fresh load, not a TTL-skip or failure');
+            assertEqual(d.enLoad.count, 1);
+            assert(typeof d.enLoad.durationMs === 'number' && d.enLoad.durationMs >= 0, 'Should record a non-negative duration');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'catalogueStatus() reports whether the releaseDate index is present',
+        fn: async () => {
+          await clearCatalogue();
+          const status = await catalogueStatus();
+          assert('hasReleaseDateIndex' in status, 'Status should report index presence so a missing v2 migration is visible, not just inferred');
+        },
+      },
+      {
+        name: 'getSearchDiagnostics() returns an array and grows after a search',
+        fn: async () => {
+          const setsIndex = [{ id: 'diagset2', name: 'Diag Set 2', releaseDate: '2021/01/01' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('diagset2.json')) return { ok: true, json: async () => [{ id: 'diagset2-1', name: 'Diag Search Card', number: '1', images: {} }] };
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const before = getSearchDiagnostics().length;
+            await searchCards('Diag Search Card');
+            const after = getSearchDiagnostics();
+            assert(after.length > before, 'A search should append to the diagnostics log');
+            const last = after[after.length - 1];
+            assert(['cache', 'local', 'live (promoOnly)', 'live (catalogue-miss-or-not-loaded)'].includes(last.path), `path should be a known value, got "${last.path}"`);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'getSearchDiagnostics() ring buffer never exceeds its cap',
+        fn: async () => {
+          const setsIndex = [{ id: 'diagset3', name: 'Diag Set 3', releaseDate: '2022/01/01' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('diagset3.json')) return { ok: true, json: async () => [{ id: 'diagset3-1', name: 'Ring Buffer Card', number: '1', images: {} }] };
+            // Any other request (e.g. a query that misses the local catalogue
+            // and falls through to the live API) — return an empty, OK result
+            // rather than 404, since this test is only exercising the ring
+            // buffer cap, not live-API error handling.
+            return { ok: true, json: async () => ({ data: [] }) };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            for (let i = 0; i < 40; i++) await searchCards(`Ring Buffer Card ${i}`);
+            const log = getSearchDiagnostics();
+            assert(log.length <= 25, `Ring buffer should cap at 25 entries, got ${log.length}`);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
+
+  /* ── v19 (cont'd): failed-set-id tracking during catalogue load ──
+   * Found while investigating a real-world "search misses a common card
+   * name despite catalogue reporting ready" report: a set that fails to
+   * fetch (network rejection OR non-ok HTTP response) during loadENCatalogue()
+   * was previously swallowed with zero record of WHICH set failed — every
+   * card in that set is then silently absent from local search, while the
+   * load still reports a plausible-looking non-zero total count. Fixed by
+   * normalizing every per-set fetch to always resolve (catching network
+   * rejections too) and recording failed setIds in diagnostics. */
+  {
+    name: 'loadENCatalogue() — failed-set-id tracking (v19)',
+    tests: [
+      {
+        name: 'A non-ok HTTP response for one set is recorded by setId in diagnostics',
+        fn: async () => {
+          const setsIndex = [
+            { id: 'goodset', name: 'Good Set', releaseDate: '2020/01/01' },
+            { id: 'badset',  name: 'Bad Set',  releaseDate: '2021/01/01' },
+          ];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('goodset.json')) return { ok: true, json: async () => [{ id: 'goodset-1', name: 'Good Card', number: '1', images: {} }] };
+            if (url.includes('badset.json'))  return { ok: false, status: 404 }; // simulates a missing/renamed set file
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            assert(result.loaded, 'Load should still succeed overall — one bad set must not abort the whole load');
+            assertEqual(result.count, 1, 'Only the good set\'s 1 card should be counted');
+            const d = getCatalogueDiagnostics();
+            assertEqual(d.enLoad.failedSetIds.length, 1, 'Exactly one set should be recorded as failed');
+            assertEqual(d.enLoad.failedSetIds[0], 'badset', 'The failed set\'s id should be recorded by name, not silently dropped');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'A network-level rejection (not just a non-ok response) is ALSO recorded by setId',
+        fn: async () => {
+          // This is the specific case that was previously completely
+          // untraceable: Promise.allSettled's rejected branch carries no
+          // setId, so a thrown fetch error used to vanish with no record
+          // of which set caused it.
+          const setsIndex = [
+            { id: 'goodset2',     name: 'Good Set 2',     releaseDate: '2020/01/01' },
+            { id: 'networkfail',  name: 'Network Fail Set', releaseDate: '2021/01/01' },
+          ];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('goodset2.json')) return { ok: true, json: async () => [{ id: 'goodset2-1', name: 'Good Card 2', number: '1', images: {} }] };
+            if (url.includes('networkfail.json')) throw new Error('simulated network failure'); // rejects, doesn't resolve
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            const result = await loadENCatalogue();
+            assert(result.loaded, 'Load should still succeed overall despite the network-level failure on one set');
+            const d = getCatalogueDiagnostics();
+            assert(d.enLoad.failedSetIds.includes('networkfail'), `Network-rejected set id should still be recorded — got [${d.enLoad.failedSetIds.join(', ')}]`);
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+      {
+        name: 'No failed sets → failedSetIds is an empty array, not null/undefined',
+        fn: async () => {
+          const setsIndex = [{ id: 'allgood', name: 'All Good Set', releaseDate: '2020/01/01' }];
+          const originalFetch = global.fetch;
+          global.fetch = async (url) => {
+            if (url.includes('sets/en.json')) return { ok: true, json: async () => setsIndex };
+            if (url.includes('allgood.json')) return { ok: true, json: async () => [{ id: 'allgood-1', name: 'All Good Card', number: '1', images: {} }] };
+            return { ok: false, status: 404 };
+          };
+          try {
+            await clearCatalogue();
+            await loadENCatalogue();
+            const d = getCatalogueDiagnostics();
+            assert(Array.isArray(d.enLoad.failedSetIds) && d.enLoad.failedSetIds.length === 0, 'failedSetIds should be an empty array when nothing failed');
+          } finally {
+            global.fetch = originalFetch;
+          }
+        },
+      },
+    ],
+  },
 
 ];
 

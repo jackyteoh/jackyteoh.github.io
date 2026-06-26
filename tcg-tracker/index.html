@@ -25,6 +25,8 @@
           </svg>
           Refresh prices
         </button>
+        <button class="btn btn-sm" id="refresh-missing-btn" title="Refresh only cards with no market price yet">↻ Refresh missing</button>
+        <button class="btn btn-sm" id="retry-failed-btn" title="Retry only the cards that failed on the last refresh" style="display:none">⟳ Retry failed</button>
         <label class="skip-sold-label" title="Exclude sold cards from price refresh">
           <input type="checkbox" id="skip-sold-cb" checked>
           Skip sold
@@ -42,6 +44,9 @@
     <div class="status-row">
       <div id="refresh-status-bar" class="refresh-status"></div>
       <div class="cache-controls">
+        <span id="catalogue-status" class="cache-status-text" title="Local on-device search index, loads once in the background">Loading local search index…</span>
+        <button class="btn btn-sm" id="rebuild-catalogue-btn"
+                title="Force a full re-fetch of the local card search index, bypassing the 7-day cache. Use this if search results seem incomplete or stale.">⟳ Rebuild search index</button>
         <span id="cache-status" class="cache-status-text"></span>
         <button class="btn btn-sm" id="clear-cache-btn"
                 title="Clear price and search cache — next refresh fetches fresh data">Clear cache</button>
@@ -61,8 +66,8 @@
 
     <!-- ── Summary metrics ──────────────────────────────────────────────── -->
     <div class="summary-bar">
-      <div class="metric"><div class="metric-label">Total cards</div><div class="metric-value" id="sum-count">0</div></div>
-      <div class="metric"><div class="metric-label">Total invested</div><div class="metric-value" id="sum-cost">$0.00</div></div>
+      <div class="metric"><div class="metric-label">Available / Total cards</div><div class="metric-value" id="sum-count">0 / 0</div></div>
+      <div class="metric"><div class="metric-label">Current / Lifetime invested</div><div class="metric-value" id="sum-cost">$0.00 / $0.00</div></div>
       <div class="metric"><div class="metric-label">Market value</div><div class="metric-value" id="sum-market">$0.00</div></div>
       <div class="metric">
         <div class="metric-label">Expected profit</div>

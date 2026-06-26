@@ -13,6 +13,11 @@
  * All English card logic (pokemontcg.io) unchanged.
  */
 
+// IndexedDB-backed local catalogue for instant search (see catalogue.js).
+// These calls are safe no-ops returning empty/false if IndexedDB is
+// unavailable, so every call site below has a live-API fallback path.
+import { isEnCatalogueLoaded, searchENCatalogue, searchJPCatalogue, isJPSetCached } from './catalogue.js';
+
 export const CONDITIONS = ['NM', 'LP', 'MP', 'HP', 'DMG'];
 
 export const COND_MULT = { NM: 1.00, LP: 0.85, MP: 0.70, HP: 0.50, DMG: 0.30 };
@@ -57,7 +62,17 @@ export function buildTCGSearchUrl(name, setName = '', fallbackLink = '') {
 export const CACHE_TTL_MS        = 60 * 60 * 1000;
 export const SEARCH_CACHE_TTL_MS = 6  * 60 * 60 * 1000;
 export const PRICE_CACHE_PREFIX  = 'tcg_price_';
-const        SEARCH_CACHE_PREFIX = 'tcg_search_';
+// v19 fix: clearPriceCache()'s sweep matched the exact versioned prefix
+// (e.g. 'tcg_search_v2_'), so when SEARCH_CACHE_PREFIX was bumped in v18 to
+// invalidate stale results, the OLD-prefixed entries became permanently
+// orphaned — never read back (good, that was the point) but also never
+// swept by "clear cache" (a real cleanup gap, caught by a v19 test).
+// SEARCH_CACHE_BASE is the stable, never-changing root every versioned
+// prefix is built from, so the sweep below catches old AND current AND any
+// future version bump automatically — bump SEARCH_CACHE_PREFIX's suffix
+// freely without ever touching the sweep logic again.
+const        SEARCH_CACHE_BASE   = 'tcg_search_';
+const        SEARCH_CACHE_PREFIX = SEARCH_CACHE_BASE + 'v2_';
 
 export function readPriceCache(key) {
   try {
@@ -78,7 +93,7 @@ export function clearPriceCache() {
     const toRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k?.startsWith(PRICE_CACHE_PREFIX) || k?.startsWith(SEARCH_CACHE_PREFIX)) toRemove.push(k);
+      if (k?.startsWith(PRICE_CACHE_PREFIX) || k?.startsWith(SEARCH_CACHE_BASE)) toRemove.push(k);
     }
     toRemove.forEach(k => localStorage.removeItem(k));
   } catch { /* ignore */ }
@@ -107,6 +122,27 @@ export function readSearchCache(key) {
 }
 export function writeSearchCache(key, results) {
   try { localStorage.setItem(key, JSON.stringify({ results, cachedAt: Date.now() })); } catch { /* quota */ }
+}
+
+/* ── Search diagnostics (v19) ────────────────────────────────────────
+ * Pure observability — records which path each searchCards() call took
+ * (cache / local catalogue / live API) and how long it took, in a small
+ * ring buffer. Lets you confirm from the console whether search is
+ * actually being served locally or silently falling back to the network,
+ * instead of guessing from perceived speed. Never throws, never changes
+ * search behavior or results.
+ */
+const SEARCH_DIAG_MAX = 25;
+const _searchDiagLog = [];
+function _logSearchPath(entry) {
+  _searchDiagLog.push({ ts: Date.now(), ...entry });
+  if (_searchDiagLog.length > SEARCH_DIAG_MAX) _searchDiagLog.shift();
+  const ms = entry.ms?.toFixed ? entry.ms.toFixed(1) : entry.ms;
+  console.info(`[tcg-diag] search "${entry.query}" → path=${entry.path} (${ms}ms, ${entry.count} results)`);
+}
+/** Snapshot of recent searchCards() routing/timing — see _logSearchPath above. */
+export function getSearchDiagnostics() {
+  return _searchDiagLog.slice();
 }
 
 /* ── Card model ──────────────────────────────────────────── */
@@ -216,7 +252,15 @@ export function exportCSV(cards) {
 }
 export function generateFilename() {
   const d = new Date();
-  return `tcg-tracker-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}.csv`;
+  let hours = d.getHours();
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+
+  // Convert 24-hour time to 12-hour format
+  hours = hours % 12;
+  hours = hours ? hours : 12; // The hour '0' should be '12'
+
+  return `tcg-tracker-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}-${hours}${minutes}${ampm}.csv`;
 }
 export async function downloadCSV(cards) {
   const content = exportCSV(cards), filename = generateFilename();
@@ -237,9 +281,20 @@ export function parseCSV(text) {
   return lines.slice(1).map(line => { const vals = splitCSVLine(line); const obj = {}; headers.forEach((h, i) => { obj[h] = (vals[i] ?? '').trim(); }); return obj; });
 }
 export function splitCSVLine(line) {
+  // BUGFIX (pre-v14, unrelated to search/refresh work): the previous version
+  // toggled inQuote on every '"' character, which silently dropped escaped
+  // quotes (the standard CSV "" -> " convention) instead of collapsing them
+  // to a single literal quote. e.g. notes containing `he said ""NM""` would
+  // round-trip as `he said NM` instead of `he said "NM"`.
   const result = []; let cur = '', inQuote = false;
-  for (const ch of line) {
-    if (ch === '"') { inQuote = !inQuote; continue; }
+  const chars = Array.from(line);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch === '"') {
+      if (inQuote && chars[i + 1] === '"') { cur += '"'; i++; continue; } // escaped quote
+      inQuote = !inQuote;
+      continue;
+    }
     if (ch === ',' && !inQuote) { result.push(cur); cur = ''; continue; }
     cur += ch;
   }
@@ -282,32 +337,144 @@ export function stripPromoSuffix(query) {
   return q;
 }
 
-/** Search pokemontcg.io. promoOnly adds rarity:Promo filter (Promo is a rarity, not a subtype). */
+/**
+ * Score how closely a card name matches the search query, for ranking.
+ * Lower is better (sorted ascending). No fuzzy/edit-distance — pure
+ * substring-position scoring, which is predictable and cheap (O(n) per
+ * candidate, run once over whatever result set we already have).
+ *
+ *   0 = exact match (case-insensitive)
+ *   1 = starts with query
+ *   2 = query appears as a whole word inside the name
+ *   3 = query appears as a substring anywhere
+ *   4 = no match found (shouldn't happen post-filter, kept as a safe floor)
+ */
+export function matchScore(name, query) {
+  const n = (name || '').toLowerCase();
+  const q = (query || '').toLowerCase().trim();
+  if (!q) return 4;
+  if (n === q) return 0;
+  if (n.startsWith(q)) return 1;
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const wordBoundary = new RegExp('\\b' + escaped + '\\b');
+  if (wordBoundary.test(n)) return 2;
+  if (n.includes(q)) return 3;
+  return 4;
+}
+
+/**
+ * Get a card's release date for ranking, handling both result shapes:
+ * the local catalogue's flat `card.releaseDate` (see catalogue.js) and the
+ * live pokemontcg.io API's nested `card.set.releaseDate`. Missing/unknown
+ * dates sort last (empty string sorts after any real "YYYY/MM/DD" value
+ * in the descending localeCompare used by rankResults below).
+ */
+function getReleaseDate(card) {
+  return card.releaseDate || card.set?.releaseDate || '';
+}
+
+/**
+ * Sort search results, newest release first, preserving the API's
+ * original order as a final tiebreaker.
+ *
+ * v20 DESIGN CHANGE: release date is now the PRIMARY sort key, with
+ * matchScore() closeness only breaking ties among cards from the same
+ * release date. This reverses the v15 design (relevance primary, date as
+ * tiebreaker) — deliberately, per user feedback: for a mostly-modern
+ * collection, searching "Charizard" should surface "Mega Charizard X ex"
+ * or a recent "Charizard ex" before a decades-old plain "Charizard"
+ * print, even though the old print is a "closer" string match. This is
+ * safe to do at the ranking stage because every candidate reaching this
+ * function already contains the query as a substring — inclusion was
+ * already filtered upstream (searchENCatalogue's nameLower.includes(q),
+ * or the live API's wildcard `name:*query*`) — so there's no risk of an
+ * unrelated card outranking a relevant one just because it's newer; the
+ * only thing changing is ORDER among already-relevant matches.
+ */
+export function rankResults(results, query) {
+  return [...results]
+    .map((card, idx) => ({ card, idx, score: matchScore(card.name, query), releaseDate: getReleaseDate(card) }))
+    .sort((a, b) => b.releaseDate.localeCompare(a.releaseDate) || a.score - b.score || a.idx - b.idx)
+    .map(r => r.card);
+}
+
+/**
+ * Search pokemontcg.io. promoOnly adds rarity:Promo filter (Promo is a
+ * rarity, not a subtype).
+ *
+ * PERFORMANCE: tries the local IndexedDB catalogue first (sub-1ms, see
+ * catalogue.js). If the catalogue hasn't loaded yet or returns nothing,
+ * falls back to the live API with exact+wildcard fired in parallel via
+ * Promise.allSettled — previously these were sequential, paying two full
+ * round-trips back to back on any miss (~600ms+ worst case).
+ *
+ * Results are ranked by closeness to the query before returning (see
+ * rankResults) so the best match always appears first regardless of
+ * source ordering.
+ *
+ * Note: promoOnly always uses the live API since the local catalogue
+ * doesn't index rarity — it's a rare enough path that the extra latency
+ * is an acceptable tradeoff for not bloating the local index.
+ */
 export async function searchCards(query, setQuery = '', promoOnly = false) {
+  const startedAt = Date.now();
   const cleaned  = stripPromoSuffix(query);
   const cacheKey = searchCacheKey(cleaned, setQuery, promoOnly);
   const cached   = readSearchCache(cacheKey);
-  if (cached) return cached;
-
-  const setFilter   = setQuery  ? ` set.name:"${setQuery}"` : '';
-  const promoFilter = promoOnly ? ' rarity:Promo'            : '';
-  const base        = `${POKEMON_API}?pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
-
-  const exactRes = await fetch(`${base}&q=${encodeURIComponent(`name:"${cleaned}"${setFilter}${promoFilter}`)}`);
-  if (!exactRes.ok) throw new Error(`API error ${exactRes.status}`);
-  let data = (await exactRes.json()).data || [];
-
-  if (data.length === 0 || promoOnly) {
-    try {
-      const wildRes = await fetch(`${base}&q=${encodeURIComponent(`name:*${cleaned}*${setFilter}${promoFilter}`)}`);
-      if (wildRes.ok) {
-        const wildData = (await wildRes.json()).data || [];
-        if (promoOnly || data.length === 0) data = wildData;
-      }
-    } catch { /* fall through */ }
+  if (cached) {
+    _logSearchPath({ query: cleaned, setQuery, promoOnly, path: 'cache', count: cached.length, ms: Date.now() - startedAt });
+    return cached;
   }
 
+  // ── Path A: local IndexedDB catalogue (instant) ────────────────
+  if (!promoOnly && await isEnCatalogueLoaded()) {
+    const localResults = await searchENCatalogue(cleaned, setQuery, 100);
+    if (localResults.length > 0) {
+      const ranked = rankResults(localResults, cleaned);
+      writeSearchCache(cacheKey, ranked);
+      _logSearchPath({ query: cleaned, setQuery, promoOnly, path: 'local', count: ranked.length, ms: Date.now() - startedAt });
+      return ranked;
+    }
+    // Local catalogue loaded but had nothing — could be a brand new card
+    // not yet in the snapshot. Fall through to live API rather than
+    // returning an empty result.
+  }
+
+  // ── Path B: live API, exact + wildcard in parallel ──────────────
+  const setFilter   = setQuery  ? ` set.name:"${setQuery}"` : '';
+  const promoFilter = promoOnly ? ' rarity:Promo'            : '';
+  const base         = `${POKEMON_API}?pageSize=100&orderBy=-set.releaseDate&select=id,name,images,set,number,tcgplayer`;
+  const exactUrl      = `${base}&q=${encodeURIComponent(`name:"${cleaned}"${setFilter}${promoFilter}`)}`;
+  const wildUrl        = `${base}&q=${encodeURIComponent(`name:*${cleaned}*${setFilter}${promoFilter}`)}`;
+
+  const [exactSettled, wildSettled] = await Promise.allSettled([
+    fetch(exactUrl),
+    fetch(wildUrl),
+  ]);
+
+  let exactData = [];
+  if (exactSettled.status === 'fulfilled' && exactSettled.value.ok) {
+    exactData = (await exactSettled.value.json()).data || [];
+  } else if (exactSettled.status === 'fulfilled' && !exactSettled.value.ok) {
+    throw new Error(`API error ${exactSettled.value.status}`);
+  }
+
+  let wildData = [];
+  if (wildSettled.status === 'fulfilled' && wildSettled.value.ok) {
+    wildData = (await wildSettled.value.json()).data || [];
+  }
+
+  let data = (promoOnly || exactData.length === 0) ? wildData : exactData;
+  if (data.length === 0) data = exactData.length ? exactData : wildData;
+
+  data = rankResults(data, cleaned);
+
   writeSearchCache(cacheKey, data);
+  _logSearchPath({
+    query: cleaned, setQuery, promoOnly,
+    path: promoOnly ? 'live (promoOnly)' : 'live (catalogue-miss-or-not-loaded)',
+    count: data.length, ms: Date.now() - startedAt,
+  });
   return data;
 }
 
@@ -439,18 +606,6 @@ function normaliseTCGdexCard(c) {
 }
 
 /**
- * Search Japanese cards via TCGdex.
- *
- * Strategy:
- *  1. Hit the Japanese-language endpoint so names are in Japanese.
- *  2. If 0 results, fall back to English endpoint (some older sets
- *     are only indexed under EN names in TCGdex).
- *  Results cached for SEARCH_CACHE_TTL_MS under the 'jp' cache slot.
- *
- * @param {string} query     — name in English or Japanese
- * @param {string} [setQuery]
- */
-/**
  * Search Japanese cards.
  *
  * Routing:
@@ -459,7 +614,8 @@ function normaliseTCGdexCard(c) {
  *  - Otherwise → TCGdex fallback (free, no key, partial JP coverage)
  *
  * Both paths return the same normalised card shape so the rest of the
- * app doesn't need to know which source was used.
+ * app doesn't need to know which source was used. Results are ranked
+ * by closeness to the query (see rankResults) before returning.
  */
 export async function searchJPCards(query, setQuery = '') {
   const cleaned  = stripPromoSuffix(query);
@@ -467,7 +623,16 @@ export async function searchJPCards(query, setQuery = '') {
   const cached   = readSearchCache(cacheKey);
   if (cached) return cached;
 
-  // ── Path A: JustTCG proxy ──────────────────────────────────────
+  // ── Path A: local catalogue for any already-cached JP sets ──────
+  // (populated on demand via catalogue.cacheJPSet — see tracker.js set browser)
+  const localResults = await searchJPCatalogue(cleaned);
+  if (localResults.length > 0) {
+    const ranked = rankResults(localResults, cleaned);
+    writeSearchCache(cacheKey, ranked);
+    return ranked;
+  }
+
+  // ── Path B: JustTCG proxy ──────────────────────────────────────
   if (proxyConfigured()) {
     try {
       const params = new URLSearchParams({ q: cleaned });
@@ -475,14 +640,14 @@ export async function searchJPCards(query, setQuery = '') {
       const res = await fetch(`${PROXY_BASE_URL.trim()}/jp/search?${params}`);
       if (res.ok) {
         const json = await res.json();
-        const data = (json.cards || []).map(normaliseJustTCGCard);
+        const data = rankResults((json.cards || []).map(normaliseJustTCGCard), cleaned);
         writeSearchCache(cacheKey, data);
         return data;
       }
     } catch { /* fall through to TCGdex */ }
   }
 
-  // ── Path B: TCGdex fallback ────────────────────────────────────
+  // ── Path C: TCGdex fallback ────────────────────────────────────
   const nameFilter = `name=like:${encodeURIComponent(cleaned)}`;
   const setFilter  = setQuery ? `&set.name=like:${encodeURIComponent(setQuery)}` : '';
   const pagination = `&sort:field=localId&sort:order=DESC&pagination:page=1&pagination:itemsPerPage=80`;
@@ -500,22 +665,80 @@ export async function searchJPCards(query, setQuery = '') {
     } catch { /* network error */ }
   }
 
-  const data = raw.map(normaliseTCGdexCard);
+  const data = rankResults(raw.map(normaliseTCGdexCard), cleaned);
   writeSearchCache(cacheKey, data);
   return data;
 }
 
 /**
- * Fetch available JP sets from the proxy (JustTCG).
- * Returns [] when proxy is not configured.
+ * Fetch available JP sets — tries the proxy (JustTCG) first for richer
+ * data when configured, falls back to TCGdex's free sets list otherwise.
+ *
+ * FIX: previously this returned [] unconditionally when no proxy was
+ * configured, which meant the JP set browser was permanently empty for
+ * anyone who hadn't deployed the Cloudflare Worker — a free TCGdex-backed
+ * set list is always available regardless of proxy setup.
+ *
  * @returns {Promise<Array<{id, name, releaseDate, cardCount}>>}
  */
 export async function fetchJPSets() {
-  if (!proxyConfigured()) return [];
+  if (proxyConfigured()) {
+    try {
+      const res = await fetch(`${PROXY_BASE_URL.trim()}/jp/sets`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) return data;
+      }
+    } catch { /* fall through to TCGdex */ }
+  }
+  return fetchTCGdexSetsList();
+}
+
+/**
+ * Fetch the full card list for one TCGdex set. Used to populate the local
+ * IndexedDB JP catalogue (see catalogue.cacheJPSet) so repeat searches
+ * within a set the user has opened are served instantly afterward.
+ *
+ * @param {string} setId — TCGdex set id, e.g. "sv6a"
+ * @returns {Promise<Array>} raw TCGdex card objects, or [] on failure
+ */
+export async function fetchTCGdexSetCards(setId) {
+  if (!setId) return [];
   try {
-    const res = await fetch(`${PROXY_BASE_URL.trim()}/jp/sets`);
+    const res = await fetch(`${TCGDEX_API}/en/sets/${encodeURIComponent(setId)}`);
     if (!res.ok) return [];
-    return await res.json();
+    const data = await res.json();
+    return Array.isArray(data?.cards) ? data.cards : [];
+  } catch { return []; }
+}
+
+/**
+ * Fetch the list of all sets from TCGdex directly — no proxy/API key
+ * required, unlike fetchJPSets() which only works when PROXY_BASE_URL is
+ * configured (JustTCG-backed). This is the fallback source for the JP set
+ * browser so it's never empty just because the user hasn't set up the
+ * Cloudflare Worker proxy yet.
+ *
+ * Coverage note: TCGdex's set list includes JP-exclusive sets (confirmed
+ * via their cards-database repo, which mirrors this same data) alongside
+ * EN/other-language sets — we don't filter by language here since the set
+ * browser is shown specifically in JP mode and TCGdex set IDs already
+ * disambiguate (e.g. "sv6a" vs "swsh7").
+ *
+ * @returns {Promise<Array<{id, name, releaseDate, cardCount}>>}
+ */
+export async function fetchTCGdexSetsList() {
+  try {
+    const res = await fetch(`${TCGDEX_API}/en/sets`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data.map(s => ({
+      id:          s.id          || '',
+      name:        s.name        || s.id || '',
+      releaseDate: s.releaseDate || '',
+      cardCount:   s.cardCount?.total || s.cardCount?.official || 0,
+    })).filter(s => s.id);
   } catch { return []; }
 }
 

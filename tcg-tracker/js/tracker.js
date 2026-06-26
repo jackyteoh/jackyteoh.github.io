@@ -1,10 +1,16 @@
 /**
- * tracker.js — UI logic.  v11
+ * tracker.js — UI logic.  v14
  *
- * JP search now routes to searchJPCards() (TCGdex API).
+ * JP search now routes to searchJPCards() (TCGdex API / JustTCG proxy).
  * Price refresh detects "tcgdex:" prefix → calls fetchJPCardPrices().
  * Language badge shown on JP card rows.
- * All English card logic unchanged.
+ *
+ * v14 performance changes:
+ *  - Background-loads the EN card catalogue into IndexedDB on boot
+ *    (see catalogue.js) so search becomes near-instant once loaded.
+ *  - Bulk refresh and the main "Refresh prices" button now batch
+ *    5 concurrent fetches at a time instead of one-at-a-time.
+ *  - Search results are now ranked by closeness to the typed query.
  */
 
 import {
@@ -14,13 +20,19 @@ import {
   fmt, fmtPct, fmtTime, fmtDate, fmtAge, escHtml,
   exportCSV, downloadCSV, parseCSV, csvRowToCard,
   searchCards, fetchCardPrices, fetchCardByUrl,
-  searchJPCards, fetchJPCardPrices, fetchJPSets, parseTCGdexId,
+  searchJPCards, fetchJPCardPrices, fetchJPSets, fetchTCGdexSetCards, parseTCGdexId,
   extractTCGdexTCGPlayerPrice,
   proxyConfigured, PROXY_BASE_URL, finishToJustTCGPrinting,
   readPriceCache, inspectPriceCache, clearPriceCache, CACHE_TTL_MS,
   snapshotCards, UNDO_MAX_SNAPSHOTS,
   buildTCGSearchUrl, getSeedCards,
+  getSearchDiagnostics,
 } from './core.js';
+import {
+  loadENCatalogue, isEnCatalogueLoaded, catalogueStatus,
+  cacheJPSet, indexedDBAvailable, getCatalogueDiagnostics,
+  searchENCatalogue, clearCatalogue,
+} from './catalogue.js';
 
 /* ============================================================
    State
@@ -46,7 +58,7 @@ let lastRefreshProfitDelta = null;
 let sortKey        = 'dateAdded';
 let _pendingEdit   = false;  // true while a cell is being edited
 let jpSetsCache    = null;  // fetched once from proxy /jp/sets
-let sortDir        = 'desc';
+let sortDir        = 'asc';
 let searchJapanese = false;   // true = JP mode (TCGdex)
 let searchPromoOnly = false;  // true = promo filter (EN only)
 
@@ -128,14 +140,17 @@ function updateUndoButton() { const btn = document.getElementById('undo-btn'); i
    ============================================================ */
 
 function updateSummary() {
-  let count = 0, cost = 0, market = 0, expProfit = 0, totalSold = 0, actualProfit = 0;
+  let count = 0, available = 0, cost = 0, currentCost = 0, market = 0, expProfit = 0, totalSold = 0, actualProfit = 0;
   for (const c of cards) {
-    count++; cost += parseFloat(c.buyCost) || 0;
-    if (!c.sold) { const m = adjPrice(c); market += m; expProfit += m - (parseFloat(c.buyCost) || 0); }
-    else { const sp = parseFloat(c.soldPrice) || 0; if (sp) { totalSold += sp; actualProfit += sp - (parseFloat(c.buyCost) || 0); } }
+    count++; const buyCost = parseFloat(c.buyCost) || 0; cost += buyCost;
+    if (!c.sold) {
+      available++; currentCost += buyCost;
+      const m = adjPrice(c); market += m; expProfit += m - buyCost;
+    }
+    else { const sp = parseFloat(c.soldPrice) || 0; if (sp) { totalSold += sp; actualProfit += sp - buyCost; } }
   }
-  document.getElementById('sum-count').textContent  = count;
-  document.getElementById('sum-cost').textContent   = fmt(cost);
+  document.getElementById('sum-count').textContent  = `${available} / ${count}`;
+  document.getElementById('sum-cost').textContent   = `${fmt(currentCost)} / ${fmt(cost)}`;
   document.getElementById('sum-market').textContent = fmt(market);
   const profitEl = document.getElementById('sum-profit');
   profitEl.textContent = fmt(expProfit); profitEl.className = 'metric-value ' + (expProfit >= 0 ? 'pos' : 'neg');
@@ -261,22 +276,32 @@ async function bulkRefresh() {
   if (btn) { btn.disabled = true; btn.textContent = '⟳ …'; }
   setStatus(`Refreshing ${uniqueIds.length} price${uniqueIds.length !== 1 ? 's' : ''} for selected cards…`, '');
   pushUndo();
-  let ok = 0, fail = 0; const priceMap = {}, updatedIds = [];
-  for (const tcgId of uniqueIds) {
-    const jpId = parseTCGdexId(tcgId);
-    try {
+  let ok = 0, fail = 0; const priceMap = {};
+
+  // PERFORMANCE FIX: batch fetches in groups of BATCH_SIZE concurrent
+  // requests instead of one-at-a-time with a fixed delay between every
+  // single card. The throttle now sits BETWEEN batches, not between
+  // every card, so N cards take ceil(N/5) throttle waits instead of N.
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+    const batch = uniqueIds.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(async (tcgId) => {
+      const jpId = parseTCGdexId(tcgId);
       if (jpId) {
-        // JP card — use TCGdex
-        const card   = eligible.find(c => c.tcgplayerId === tcgId);
-        const prices = await fetchJPCardPrices(jpId, card?.finish || 'normal', true);
-        if (prices) { priceMap[tcgId] = prices; ok++; } else fail++;
-      } else {
-        const prices = await fetchCardPrices(tcgId, true);
-        if (prices) { priceMap[tcgId] = prices; ok++; } else fail++;
+        const card = eligible.find(c => c.tcgplayerId === tcgId);
+        return { tcgId, prices: await fetchJPCardPrices(jpId, card?.finish || 'normal', true) };
       }
-    } catch { fail++; }
-    await new Promise(r => setTimeout(r, 120));
+      return { tcgId, prices: await fetchCardPrices(tcgId, true) };
+    }));
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.prices) { priceMap[r.value.tcgId] = r.value.prices; ok++; }
+      else fail++;
+    }
+    // Throttle between batches only, not between every card
+    if (i + BATCH_SIZE < uniqueIds.length) await new Promise(r => setTimeout(r, 200));
   }
+
+  const updatedIds = [];
   for (const card of eligible) {
     const jpId = parseTCGdexId(card.tcgplayerId);
     const p    = priceMap[card.tcgplayerId]; if (!p) continue;
@@ -678,11 +703,14 @@ function toggleHideSold(checked) { hideSold = checked; saveHideSold(); renderTab
    Global price refresh — routes EN to pokemontcg.io, JP to TCGdex
    ============================================================ */
 
-async function refreshAllPrices() {
+let lastFailedTcgIds = new Set();
+
+async function refreshAllPrices(filterFn = null, opts = {}) {
   if (refreshing) return;
   const skipSold = document.getElementById('skip-sold-cb')?.checked ?? true;
-  const eligible = cards.filter(c => c.tcgplayerId && !(skipSold && c.sold));
-  if (!eligible.length) { setStatus(skipSold ? 'No unsold cards with price data.' : 'No cards with price data.', 'err'); return; }
+  let eligible = cards.filter(c => c.tcgplayerId && !(skipSold && c.sold));
+  if (filterFn) eligible = eligible.filter(filterFn);
+  if (!eligible.length) { setStatus(opts.emptyMsg || (skipSold ? 'No unsold cards with price data.' : 'No cards with price data.'), 'err'); return; }
 
   const uniqueIds = [...new Set(eligible.map(c => c.tcgplayerId))];
   const idToName  = {}; for (const c of eligible) { if (!idToName[c.tcgplayerId]) idToName[c.tcgplayerId] = c.name; }
@@ -702,26 +730,36 @@ async function refreshAllPrices() {
   setStatus('', '');
 
   pushUndo();
-  let ok = 0, fail = 0; const priceMap = {}, updatedIds = [];
+  let ok = 0, fail = 0; const priceMap = {}, updatedIds = [], failedThisRun = new Set();
 
-  for (let i = 0; i < uniqueIds.length; i++) {
-    const tcgId = uniqueIds[i];
-    const jpId  = parseTCGdexId(tcgId);
+  // PERFORMANCE FIX: batch BATCH_SIZE cards concurrently instead of one
+  // request at a time. Progress bar advances per batch rather than per
+  // card. The 120ms throttle moves to between batches, so total wait
+  // time drops from N throttles to ceil(N/BATCH_SIZE) throttles.
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+    const batch = uniqueIds.slice(i, i + BATCH_SIZE);
     if (progressBar)   progressBar.style.width   = Math.round((i / total) * 100) + '%';
-    if (progressCount) progressCount.textContent = `${i + 1} / ${total}`;
-    if (progressLabel) progressLabel.textContent = `Fetching: ${idToName[tcgId] || tcgId}`;
-    try {
+    if (progressCount) progressCount.textContent = `${Math.min(i + batch.length, total)} / ${total}`;
+    if (progressLabel) progressLabel.textContent = batch.length > 1
+      ? `Fetching ${batch.length} prices…`
+      : `Fetching: ${idToName[batch[0]] || batch[0]}`;
+
+    const results = await Promise.allSettled(batch.map(async (tcgId) => {
+      const jpId = parseTCGdexId(tcgId);
       if (jpId) {
-        // JP card: find the card object to get its finish for variant selection
-        const card   = eligible.find(c => c.tcgplayerId === tcgId);
+        const card = eligible.find(c => c.tcgplayerId === tcgId);
         const prices = await fetchJPCardPrices(jpId, card?.finish || 'normal', true);
-        if (prices) { priceMap[tcgId] = { _tcgdex: prices }; ok++; } else fail++;
-      } else {
-        const prices = await fetchCardPrices(tcgId, true);
-        if (prices) { priceMap[tcgId] = prices; ok++; } else fail++;
+        return { tcgId, prices: prices ? { _tcgdex: prices } : null };
       }
-    } catch { fail++; }
-    await new Promise(r => setTimeout(r, 120));
+      return { tcgId, prices: await fetchCardPrices(tcgId, true) };
+    }));
+    results.forEach((r, idx) => {
+      const tcgId = batch[idx];
+      if (r.status === 'fulfilled' && r.value.prices) { priceMap[tcgId] = r.value.prices; ok++; failedThisRun.delete(tcgId); }
+      else { fail++; failedThisRun.add(tcgId); }
+    });
+    if (i + BATCH_SIZE < uniqueIds.length) await new Promise(r => setTimeout(r, 200));
   }
 
   if (progressBar)   progressBar.style.width   = '100%';
@@ -758,11 +796,24 @@ async function refreshAllPrices() {
 
   setTimeout(() => { if (progressWrap) progressWrap.style.display = 'none'; if (progressBar) progressBar.style.width = '0%'; if (progressLabel) progressLabel.textContent = 'Fetching prices…'; if (progressCount) progressCount.textContent = '0 / 0'; }, 800);
 
+  lastFailedTcgIds = failedThisRun;
+  const retryBtn = document.getElementById('retry-failed-btn');
+  if (retryBtn) retryBtn.style.display = failedThisRun.size ? 'inline-flex' : 'none';
+
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   setStatus(`Refreshed ${ok} price${ok !== 1 ? 's' : ''} → ${updatedIds.length} card${updatedIds.length !== 1 ? 's' : ''} updated` + (fail ? ` · ${fail} failed` : '') + `  ·  ${time}`, fail && !ok ? 'err' : 'ok');
   refreshBtn.disabled = false;
   refreshBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8a7 7 0 1 0 1.4-4.2"/><polyline points="1,2 1,6 5,6"/></svg> Refresh prices`;
   refreshing = false; updateCacheStatus();
+}
+
+function retryFailedPrices() {
+  if (!lastFailedTcgIds.size) return;
+  refreshAllPrices(c => lastFailedTcgIds.has(c.tcgplayerId), { emptyMsg: 'No failed cards to retry.' });
+}
+
+function refreshMissingPrices() {
+  refreshAllPrices(c => c.marketNM === null || c.marketNM === undefined, { emptyMsg: 'No cards are missing a market price.' });
 }
 
 function setStatus(html, type = '') { const el = document.getElementById('refresh-status-bar'); el.className = 'refresh-status ' + type; el.innerHTML = html; }
@@ -1027,6 +1078,29 @@ function addSelectedCard() {
       saveCardsToStorage(); renderTable();
     }).catch(() => { /* silently fail — user can refresh manually */ });
   }
+
+  // FIX #1: EN cards added with no price (e.g. matched from the local
+  // catalogue, which never carries pricing — confirmed pokemon-tcg-data has
+  // no tcgplayer field on any card) get an immediate background price
+  // fetch too, mirroring the JP path above. Non-blocking — the card is
+  // already on screen and usable before this resolves.
+  if (!isJP && tcgplayerId && marketNM === null) {
+    fetchCardPrices(tcgplayerId, false).then(prices => {
+      if (!prices) return;
+      const p = prices[entry.finish] || prices[Object.keys(prices)[0]] || {};
+      if (p.market == null) return;
+      const newCards = cards.filter(c => c.tcgplayerId === tcgplayerId && c.marketNM === null);
+      if (!newCards.length) return;
+      for (const c of newCards) {
+        c.marketNM = p.market;
+        if (p.low !== undefined) c.priceLow = p.low;
+        if (p.mid !== undefined) c.priceMid = p.mid;
+        c.lastRefreshed = Date.now();
+        touchUpdated(c);
+      }
+      saveCardsToStorage(); renderTable();
+    }).catch(() => { /* silently fail — user can refresh manually */ });
+  }
 }
 
 /* ============================================================
@@ -1118,7 +1192,7 @@ function renderJPSetBrowser(sets, browser) {
     </div>`;
 
   browser.querySelectorAll('.set-browser-item').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const setInput = document.getElementById('set-filter-input');
       if (setInput) {
         setInput.value = btn.dataset.setName;
@@ -1127,6 +1201,14 @@ function renderJPSetBrowser(sets, browser) {
       // Highlight selected
       browser.querySelectorAll('.set-browser-item').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
+
+      // Background-cache this set's cards into IndexedDB so subsequent
+      // searches within it (and re-visits) are served instantly. Silent —
+      // never blocks the UI, never shown as an error if it fails.
+      const setId = btn.dataset.setId;
+      if (setId && indexedDBAvailable()) {
+        cacheJPSet(setId, fetchTCGdexSetCards).catch(() => { /* silent */ });
+      }
     });
   });
 }
@@ -1143,7 +1225,9 @@ function closeHowTo() { document.getElementById('howto-modal').style.display = '
    ============================================================ */
 
 function initUI() {
-  document.getElementById('refresh-btn').addEventListener('click', refreshAllPrices);
+  document.getElementById('refresh-btn').addEventListener('click', () => refreshAllPrices());
+  document.getElementById('refresh-missing-btn').addEventListener('click', refreshMissingPrices);
+  document.getElementById('retry-failed-btn').addEventListener('click', retryFailedPrices);
   document.getElementById('undo-btn').addEventListener('click', undo);
   document.getElementById('import-csv').addEventListener('click', triggerImport);
   document.getElementById('export-csv').addEventListener('click', handleExportCSV);
@@ -1232,3 +1316,96 @@ function initUI() {
 
 renderTable();
 initUI();
+
+/* ============================================================
+   Connection pre-warm (v15, item #5)
+   ============================================================
+   Fires throwaway requests at boot purely to force the TCP+TLS handshake
+   to api.pokemontcg.io (and the JustTCG proxy, if configured) to happen
+   now rather than on the user's first "Refresh all" click. The first
+   request in any session pays ~200-400ms for handshake + negotiation;
+   subsequent requests reuse the warm connection and are much faster.
+   Result is discarded — this exists purely as a side effect. Never
+   blocks anything, never surfaces an error to the user.
+*/
+fetch('https://api.pokemontcg.io/v2/cards?pageSize=1').catch(() => { /* pre-warm only, ignore failures */ });
+if (proxyConfigured()) {
+  fetch(`${PROXY_BASE_URL.trim()}/health`).catch(() => { /* pre-warm only, ignore failures */ });
+}
+
+/* ============================================================
+   Background catalogue load (v14)
+   ============================================================
+   Kicked off after the UI is already interactive — the user can browse
+   their collection and use live search immediately. Once this resolves,
+   subsequent searches are served from IndexedDB instead of the network.
+   Never blocks anything; failures are silent and live API search remains
+   the fallback path at every call site in core.js.
+*/
+function bootCatalogue() {
+  if (!indexedDBAvailable()) return;
+  const statusEl = document.getElementById('catalogue-status');
+  loadENCatalogue((loadedSets, totalSets) => {
+    if (statusEl) statusEl.textContent = `Loading local search index… (${loadedSets}/${totalSets} sets)`;
+  }).then(async result => {
+    if (statusEl) {
+      statusEl.textContent = result.loaded
+        ? `Local search ready · ${result.count.toLocaleString()} cards`
+        : 'Local search unavailable — using live search';
+      statusEl.title = result.loaded
+        ? 'Card search is served from a local on-device index for instant results.'
+        : '';
+    }
+    // v19 diagnostics: log a one-line load summary + surface the full
+    // catalogue status (incl. whether the releaseDate index actually
+    // landed) so "search feels slow" can be checked from the console
+    // instead of guessed at.
+    const status = await catalogueStatus();
+    console.info('[tcg-diag] Catalogue ready:', status);
+  });
+}
+
+bootCatalogue();
+
+// v19: "Rebuild local search index" — forces a full re-fetch of the EN
+// catalogue, bypassing the 7-day TTL-skip. clearCatalogue() + reload was
+// always possible programmatically (clearCatalogue() has existed since
+// the original catalogue.js, with a doc comment saying it was "useful for
+// a Rebuild catalogue button") but no UI ever called it — the only way to
+// force a clean reload was clearing browser storage via devtools. Also
+// clears the search-result cache, since stale cached results (from
+// whatever the broken/partial index previously returned) would otherwise
+// keep being served from cache even after the rebuild fixes the
+// underlying index.
+document.getElementById('rebuild-catalogue-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('rebuild-catalogue-btn');
+  const statusEl = document.getElementById('catalogue-status');
+  if (btn) { btn.disabled = true; }
+  if (statusEl) statusEl.textContent = 'Rebuilding local search index…';
+  clearPriceCache(); // also sweeps the search-result cache (shared sweep, see core.js)
+  await clearCatalogue();
+  bootCatalogue();
+  // bootCatalogue()'s own .then() will re-enable status text; just restore
+  // the button once the load promise it kicked off settles.
+  try { await loadENCatalogue(); } finally { if (btn) btn.disabled = false; }
+});
+
+// v19: console-accessible diagnostics. Run `tcgDebug.status()` in devtools
+// to see catalogue load state (loaded? blocked? index present? any sets
+// that failed to fetch?) and `tcgDebug.searches()` to see the last 25
+// searches with which path each took (cache / local / live) and how long
+// it took. `tcgDebug.testLocal(query)` bypasses both the result cache AND
+// the live-API fallback, calling the local catalogue search directly —
+// use this to tell apart "card genuinely isn't in the local index" from
+// "card is indexed but the live path got used/cached for some other
+// reason," without those two looking identical from the outside.
+window.tcgDebug = {
+  status: async () => { const s = await catalogueStatus(); console.log(s); return s; },
+  catalogue: getCatalogueDiagnostics,
+  searches: getSearchDiagnostics,
+  testLocal: async (query, setQuery = '') => {
+    const results = await searchENCatalogue(query, setQuery, 100);
+    console.log(`[tcg-diag] testLocal("${query}"${setQuery ? `, set="${setQuery}"` : ''}) → ${results.length} local match(es)`, results);
+    return results;
+  },
+};

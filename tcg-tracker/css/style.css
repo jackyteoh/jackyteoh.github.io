@@ -260,7 +260,7 @@ code { font-family:var(--font-mono); font-size:11px; background:var(--bg-seconda
 .quick-add-btn { float:right; gap:5px; background:var(--text-primary); border:0.5px solid var(--border-default); border-radius:var(--radius-md); padding:7px 13px; font-size:13px; font-family:var(--font); color:var(--bg-primary); cursor:pointer; text-decoration:none; white-space:nowrap; transition:background 0.12s, opacity 0.12s;}
 .quick-add-btn:hover { opacity:0.85; }
 .card-added-feedback { font-size:12px; color:var(--text-success); background:var(--bg-success); border:0.5px solid var(--border-success); border-radius:var(--radius-sm); padding:6px 10px; margin-bottom:8px; }
-.jp-label { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-secondary); cursor:pointer; user-select:none; }
+.jp-label { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--text-secondary); margin-bottom:0.75rem; cursor:pointer; user-select:none; }
 .jp-label input[type=checkbox] { width:14px; height:14px; }
 
 /* ── Responsive ──────────────────────────────────────────────── */
